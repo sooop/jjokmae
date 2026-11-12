@@ -1,0 +1,147 @@
+:root {
+  /* 테마: 모노톤. 라이트 */
+  --bg: #f5f5f5;
+  --surface: #ffffff;
+  --surface-2: #fafafa;
+  --fg: #171717;
+  --fg-muted: #6b6b6b;
+  --border: #d4d4d4;
+  --accent: #171717;
+  --accent-fg: #fafafa;
+  --hover: #ececec;
+  --drop-bg: #ebebeb;
+  --page-bg: #ffffff;
+  --page-shadow: 0 1px 3px rgb(0 0 0 / 0.18);
+  --danger: #b42318;
+  --radius: 8px;
+  --font-sans: 'Pretendard Variable', Pretendard, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light;
+}
+/* 다크: 시스템 설정을 따르되(data-theme 없음) 명시 선택이 우선한다 */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #0a0a0a;
+    --surface: #141414;
+    --surface-2: #101010;
+    --fg: #ededed;
+    --fg-muted: #a3a3a3;
+    --border: #3a3a3a;
+    --accent: #ededed;
+    --accent-fg: #0a0a0a;
+    --hover: #222222;
+    --drop-bg: #1c1c1c;
+    --page-shadow: 0 1px 3px rgb(0 0 0 / 0.8);
+    --danger: #f97066;
+    color-scheme: dark;
+  }
+}
+:root[data-theme='dark'] {
+  --bg: #0a0a0a;
+  --surface: #141414;
+  --surface-2: #101010;
+  --fg: #ededed;
+  --fg-muted: #a3a3a3;
+  --border: #3a3a3a;
+  --accent: #ededed;
+  --accent-fg: #0a0a0a;
+  --hover: #222222;
+  --drop-bg: #1c1c1c;
+  --page-shadow: 0 1px 3px rgb(0 0 0 / 0.8);
+  --danger: #f97066;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  overflow: hidden;
+}
+code, kbd, pre, samp { font-family: var(--font-mono); }
+kbd {
+  font-size: 12px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+
+button {
+  font: inherit;
+  min-height: 32px;
+  min-width: 32px;
+  padding: 4px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--fg);
+  cursor: pointer;
+}
+button:hover:not(:disabled) { background: var(--hover); }
+button:disabled { opacity: 0.4; cursor: default; }
+button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+button.primary:hover:not(:disabled) { opacity: 0.88; background: var(--accent); }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+
+input, select, textarea {
+  font: inherit;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--fg);
+}
+@media (pointer: coarse) {
+  input, select, textarea { font-size: 16px; }
+  button { min-height: 40px; min-width: 40px; }
+}
+
+/* ---------- 인쇄 ----------
+   #print-root 는 이미지 방식 인쇄가 준비한 쪽 이미지 모음이다(print-run.ts). 있으면 앱 화면 전체를 숨기고 그것만 찍는다.
+   없으면(대화상자를 거치지 않고 브라우저 메뉴로 인쇄) 툴바·패널·탭을 숨기고 보기 모드 본문의 렌더된 쪽만 찍는다. */
+#print-root { display: none; }
+@media print {
+  html, body, #app { height: auto; overflow: visible; background: #fff; color: #000; }
+  body:has(#print-root) > #app { display: none; }
+  #print-root { display: block; }
+  #print-root .pp {
+    display: block;
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    break-after: page;
+    page-break-after: always;
+    break-inside: avoid;
+  }
+  #print-root .pp:last-child { break-after: auto; page-break-after: auto; }
+  #print-root img { display: block; width: 100%; height: 100%; object-fit: contain; }
+
+  body:not(:has(#print-root)) .app { height: auto; display: block; }
+  body:not(:has(#print-root)) .app > :not(.body),
+  body:not(:has(#print-root)) .body > :not(.viewer-area),
+  body:not(:has(#print-root)) .viewer-area > :not(.viewer-host),
+  body:not(:has(#print-root)) .viewer-host > :not(.scroller),
+  body:not(:has(#print-root)) .viewer-host .slot > :not(canvas),
+  body:not(:has(#print-root)) .viewer-host .slot:not([data-win]) { display: none !important; }
+  body:not(:has(#print-root)) .body { display: block; position: static; height: auto; background: #fff; outline: 0; }
+  body:not(:has(#print-root)) .viewer-area,
+  body:not(:has(#print-root)) .viewer-host,
+  body:not(:has(#print-root)) .viewer-host .scroller { display: block; position: static; overflow: visible; }
+  body:not(:has(#print-root)) .viewer-host .content { position: static; height: auto !important; min-width: 0 !important; }
+  body:not(:has(#print-root)) .viewer-host .slot {
+    position: static !important;
+    width: 100% !important;
+    height: auto !important;
+    margin: 0 auto !important;
+    box-shadow: none !important;
+    break-after: page;
+    break-inside: avoid;
+  }
+  body:not(:has(#print-root)) .viewer-host .slot canvas { display: block; width: 100%; height: auto; max-height: 98vh; object-fit: contain; }
+}

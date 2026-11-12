@@ -1,0 +1,13 @@
+{
+  "name": "pdf-engine-compare",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@embedpdf/pdfium": "2.15.1",
+    "@napi-rs/canvas": "*",
+    "mupdf": "1.28.6",
+    "pdf-lib": "1.17.1",
+    "pdfjs-dist": "6.5.438",
+    "playwright-core": "^1.65.0"
+  }
+}
