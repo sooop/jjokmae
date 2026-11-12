@@ -36,43 +36,65 @@ export async function applyOrder(a: Pick<EngineAdapter, 'movePage'>, doc: DocId,
   return moves;
 }
 
-function sameImage(a: RenderedBitmap, b: RenderedBitmap): boolean {
-  if (a.width !== b.width || a.height !== b.height) return false;
+/** 두 비트맵의 바이트당 평균 절대 차이(크기가 다르면 Infinity) */
+function imageDiff(a: RenderedBitmap, b: RenderedBitmap): number {
+  if (a.width !== b.width || a.height !== b.height) return Infinity;
   const x = new Uint8Array(a.data);
   const y = new Uint8Array(b.data);
   let sum = 0;
   for (let i = 0; i < x.length; i++) sum += Math.abs(x[i] - y[i]);
-  return sum / x.length < 2;
+  return sum / Math.max(1, x.length);
+}
+
+/** 최솟값과 차선의 차이가 이보다 작으면 두 후보를 구별할 수 없다(빈 쪽·대칭 쪽 등) */
+export const ROTATION_MARGIN = 1.5;
+
+/**
+ * 후보별 차이에서 가장 닮은 회전값을 고른다. certain 은 최솟값과 차선의 격차가 ROTATION_MARGIN 이상일 때
+ * (후보가 하나뿐이면 항상 true). 동률이면 앞선 후보를 고른다. 후보가 없으면 null.
+ */
+export function pickRotation(diffs: { r: Rotation; diff: number }[]): { rotation: Rotation; certain: boolean } | null {
+  if (!diffs.length) return null;
+  const ord = [...diffs].sort((p, q) => p.diff - q.diff);
+  const certain = ord.length === 1 || ord[1].diff - ord[0].diff >= ROTATION_MARGIN;
+  return { rotation: ord[0].r, certain };
 }
 
 /**
  * 어댑터에는 현재 /Rotate 를 읽는 메서드가 없고 rotatePage 는 절대값이다. 이미 회전된 쪽에 '+90' 을 정확히 하려면
- * 기준 값을 알아야 하므로, 작은 비트맵을 비교해 알아낸다: 현재 모습과 같은 크기를 만드는 후보 중 모습이 같은 값.
- * 끝나면 문서는 원래 값으로 돌아가 있다.
+ * 기준 값을 알아야 하므로, 작은 비트맵을 비교해 알아낸다: 현재 모습과 같은 크기를 만드는 후보를 모두 그려
+ * 현재 모습과 가장 닮은 값을 고른다(처음 일치하는 값에서 멈추지 않는다 — 빈 쪽 등에서 오판하므로).
+ * certain=false 는 최솟값과 차선이 구별되지 않았다는 뜻이다. 이때 후보들은 화면에서 거의 같은 모습이므로
+ * (빈 쪽·대칭 쪽) 가장 닮은 값을 기준으로 삼아도 '지금 보이는 모습에서 90도 더'는 맞게 적용된다.
+ * 끝나면 문서는 고른 값으로 돌아가 있다.
  */
+export async function detectRotationEx(
+  a: Pick<EngineAdapter, 'pageSize' | 'renderPage' | 'rotatePage'>,
+  doc: DocId,
+  index: number,
+): Promise<{ rotation: Rotation; certain: boolean }> {
+  const s0 = await a.pageSize(doc, index);
+  const scale = 48 / Math.max(1, s0.width, s0.height);
+  const ref = await a.renderPage(doc, index, scale);
+  const diffs: { r: Rotation; diff: number }[] = [];
+  for (const r of [0, 90, 180, 270] as Rotation[]) {
+    await a.rotatePage(doc, index, r);
+    const s = await a.pageSize(doc, index);
+    if (Math.abs(s.width - s0.width) > 0.5 || Math.abs(s.height - s0.height) > 0.5) continue;
+    diffs.push({ r, diff: imageDiff(ref, await a.renderPage(doc, index, scale)) });
+  }
+  const pick = pickRotation(diffs) ?? { rotation: 0 as Rotation, certain: false };
+  await a.rotatePage(doc, index, pick.rotation);
+  return pick;
+}
+
+/** detectRotationEx 의 값만(호출부가 판정 불가를 따로 다루지 않을 때) */
 export async function detectRotation(
   a: Pick<EngineAdapter, 'pageSize' | 'renderPage' | 'rotatePage'>,
   doc: DocId,
   index: number,
 ): Promise<Rotation> {
-  const s0 = await a.pageSize(doc, index);
-  const scale = 48 / Math.max(1, s0.width, s0.height);
-  const ref = await a.renderPage(doc, index, scale);
-  const candidates: Rotation[] = [];
-  let found: Rotation | null = null;
-  for (const r of [0, 90, 180, 270] as Rotation[]) {
-    await a.rotatePage(doc, index, r);
-    const s = await a.pageSize(doc, index);
-    if (Math.abs(s.width - s0.width) > 0.5 || Math.abs(s.height - s0.height) > 0.5) continue;
-    candidates.push(r);
-    if (sameImage(ref, await a.renderPage(doc, index, scale))) {
-      found = r;
-      break;
-    }
-  }
-  const base = found ?? candidates[0] ?? 0;
-  await a.rotatePage(doc, index, base);
-  return base;
+  return (await detectRotationEx(a, doc, index)).rotation;
 }
 
 export const addRotation = (r: Rotation, delta = 90): Rotation => (((r + delta) % 360) as Rotation);

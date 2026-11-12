@@ -89,3 +89,65 @@ test('static 은 같은 출처 경로로 fetch', async () => {
   assert.deepEqual(urls, ['https://site.example/app/engines/t.wasm']);
   assert.equal(store.m.size, 1);
 });
+
+function delStore() {
+  const st = memStore();
+  st.deleted = [];
+  st.delete = async (k) => { st.deleted.push(k); st.m.delete(k); };
+  return st;
+}
+const keyOf = (r) => `${r.id}@${r.sha256}`;
+
+test('오염된 캐시는 버리고 키를 지운 뒤 네트워크로 내려받음', async () => {
+  const store = delStore(), fetch = fakeFetch();
+  const bad = payload.slice(); bad[500] ^= 0xff;
+  store.m.set(keyOf(ref()), bad.buffer);
+  const src = createBinarySource({ target: 'single', store, fetch, subtle: globalThis.crypto.subtle });
+  assert.equal(await src.has(ref()), false);
+  assert.deepEqual(store.deleted, [keyOf(ref())]);
+  store.m.set(keyOf(ref()), bad.buffer);
+  const buf = await src.get(ref());
+  assert.equal(fetch.calls, 1);
+  assert.equal(new Uint8Array(buf).length, payload.length);
+  assert.deepEqual(new Uint8Array(buf), payload);
+  assert.equal(store.m.size, 1); // 정상 값으로 다시 저장됨
+});
+
+test('빈 캐시·잘린 캐시도 거부하고 지움', async () => {
+  for (const bytes of [new ArrayBuffer(0), payload.slice(0, 50_000).buffer]) {
+    const store = delStore(), fetch = fakeFetch();
+    store.m.set(keyOf(ref()), bytes);
+    const src = createBinarySource({ target: 'single', store, fetch, subtle: globalThis.crypto.subtle });
+    const buf = await src.get(ref());
+    assert.equal(buf.byteLength, payload.byteLength);
+    assert.equal(fetch.calls, 1);
+    assert.equal(store.deleted.length, 1);
+  }
+});
+
+test('정상 캐시는 해시 대조 후 fetch 없이 반환', async () => {
+  const store = delStore(), fetch = fakeFetch();
+  store.m.set(keyOf(ref()), payload.slice().buffer);
+  const src = createBinarySource({ target: 'single', store, fetch, subtle: globalThis.crypto.subtle });
+  await src.get(ref());
+  assert.equal(fetch.calls, 0);
+  assert.equal(store.deleted.length, 0);
+});
+
+test('subtle 없으면 single 은 캐시도 거부(fetch 후 no-subtle), static 은 캐시 사용', async () => {
+  const store = delStore(), fetch = fakeFetch();
+  store.m.set(keyOf(ref()), payload.slice().buffer);
+  const single = createBinarySource({ target: 'single', store, fetch, subtle: null });
+  assert.equal(await single.has(ref()), false);
+  await assert.rejects(single.get(ref()), (e) => e.code === 'no-subtle');
+  const st = createBinarySource({ target: 'static', store, fetch, subtle: null, baseUrl: 'https://s.example/' });
+  await st.get(ref());
+  assert.equal(fetch.calls, 1); // single 의 시도 1회만
+});
+
+test('store.delete 가 없는 저장소에서도 오염 캐시는 네트워크로 내려감', async () => {
+  const store = memStore(), fetch = fakeFetch();
+  store.m.set(keyOf(ref()), new ArrayBuffer(0));
+  const src = createBinarySource({ target: 'single', store, fetch, subtle: globalThis.crypto.subtle });
+  assert.equal((await src.get(ref())).byteLength, payload.byteLength);
+});

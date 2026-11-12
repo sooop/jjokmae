@@ -25,8 +25,3 @@ export function clickSelect(selected: number[], anchor: number | null, i: number
   }
   return { selected: [i], anchor: i };
 }
-
-/** 파일마다 고른 쪽을 (파일 순서, 쪽 순서)대로 펼친 합계 */
-export function totalSelected(counts: number[]): number {
-  return counts.reduce((a, b) => a + b, 0);
-}

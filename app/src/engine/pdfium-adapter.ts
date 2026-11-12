@@ -50,6 +50,8 @@ interface DocState {
   env: number;
   /** 쪽을 삭제했다(증분 저장 결과에는 삭제한 쪽의 데이터가 남는다) */
   deletedData?: boolean;
+  /** open 때 받은 암호. 저장본을 검증·굽기 위해 임시로 다시 열 때 필요하다 */
+  password?: string;
 }
 
 // FPDF_FORMFIELD_*
@@ -106,7 +108,8 @@ const DEFAULT_COLOR: Record<string, string> = {
   freetext: '#000000',
 };
 
-const MAX_BITMAP_BYTES = 768 * 1024 * 1024;
+/** 렌더 비트맵(RGBA) 상한. MuPDF 어댑터의 MAX_BITMAP_BYTES 와 같은 값·같은 규칙을 유지한다 */
+const MAX_BITMAP_BYTES = 256 * 1024 * 1024;
 
 function toU8(b: ArrayBuffer | Uint8Array): Uint8Array {
   return b instanceof Uint8Array ? b : new Uint8Array(b);
@@ -323,12 +326,8 @@ export function createPdfiumAdapter(options: PdfiumAdapterOptions): PdfiumAdapte
       for (let c; (c = h[ptr++]); ) s += String.fromCharCode(c);
       return s;
     };
-    const cb: number[] = [];
-    const add = (f: Function, sig: string) => {
-      const id = p.addFunction(f, sig);
-      cb.push(id);
-      return id;
-    };
+    // 콜백은 PDFium 이 라이브러리 수명 동안 참조하므로 removeFunction 하지 않는다(그래서 id 목록도 따로 두지 않는다)
+    const add = (f: Function, sig: string) => p.addFunction(f, sig);
     const fn = {
       release: add(() => {}, 'vi'),
       // 설치된 폰트 목록에 한글 폰트(charset 129)를 올린다
@@ -417,11 +416,11 @@ export function createPdfiumAdapter(options: PdfiumAdapterOptions): PdfiumAdapte
   }
 
   /** 바이트를 임시 문서로 로드해 콜백에 넘기고 반드시 닫는다 */
-  function withTempDoc<T>(bytes: Uint8Array, fn: (doc: number) => T): T {
+  function withTempDoc<T>(bytes: Uint8Array, fn: (doc: number) => T, password = ''): T {
     const L = lib();
     const ptr = malloc(bytes.length);
     P().HEAPU8.set(bytes, ptr);
-    const doc = L.FPDF_LoadMemDocument(ptr, bytes.length, '');
+    const doc = L.FPDF_LoadMemDocument(ptr, bytes.length, password);
     try {
       if (!doc) throw new Error(`임시 문서 로드 실패(err=${L.FPDF_GetLastError()})`);
       return fn(doc);
@@ -438,18 +437,18 @@ export function createPdfiumAdapter(options: PdfiumAdapterOptions): PdfiumAdapte
     for (let i = 0; i < st.len; i++) if (heap[st.ptr + i] !== out[i]) return false;
     try {
       const want = pageCountOf(st);
-      return withTempDoc(out, (d) => lib().FPDF_GetPageCount(d) === want);
+      return withTempDoc(out, (d) => lib().FPDF_GetPageCount(d) === want, st.password);
     } catch {
       return false;
     }
   }
 
-  function flattenBytes(full: Uint8Array): Uint8Array {
+  function flattenBytes(full: Uint8Array, password = ''): Uint8Array {
     const L = lib();
     const tmp = (() => {
       const ptr = malloc(full.length);
       P().HEAPU8.set(full, ptr);
-      const doc = L.FPDF_LoadMemDocument(ptr, full.length, '');
+      const doc = L.FPDF_LoadMemDocument(ptr, full.length, password);
       return { ptr, doc };
     })();
     try {
@@ -711,8 +710,9 @@ export function createPdfiumAdapter(options: PdfiumAdapterOptions): PdfiumAdapte
       }
     }
     if (a.contents !== undefined) setStr(annot, 'Contents', a.contents);
-    const bw = typeof extra.borderWidth === 'number' ? extra.borderWidth : 2;
-    if (type === 'square' || type === 'circle' || type === 'line' || type === 'ink') L.FPDFAnnot_SetBorder(annot, 0, 0, bw);
+    // 갱신에서 borderWidth 가 없으면 기존 값을 유지한다(부분 갱신이 선 굵기를 기본값으로 되돌리지 않도록). 새 주석만 기본값 2
+    const bw = typeof extra.borderWidth === 'number' ? extra.borderWidth : isNew ? 2 : null;
+    if (bw !== null && (type === 'square' || type === 'circle' || type === 'line' || type === 'ink')) L.FPDFAnnot_SetBorder(annot, 0, 0, bw);
     if (hlQuads) applyQuads(annot, hlQuads, xf);
     if (type === 'freetext') {
       const size = typeof extra.fontSize === 'number' ? extra.fontSize : 12;
@@ -925,7 +925,7 @@ export function createPdfiumAdapter(options: PdfiumAdapterOptions): PdfiumAdapte
         throw e;
       }
       const id = `pdfium-${++seq}`;
-      docs.set(id, { doc, ptr, len: src.length, info, env });
+      docs.set(id, { doc, ptr, len: src.length, info, env, password: opts?.password });
       return id;
     },
 
@@ -962,7 +962,11 @@ export function createPdfiumAdapter(options: PdfiumAdapterOptions): PdfiumAdapte
         (page) => {
           const w = Math.max(1, Math.round(L.FPDF_GetPageWidthF(page) * scale));
           const h = Math.max(1, Math.round(L.FPDF_GetPageHeightF(page) * scale));
-          if (w * h * 4 > MAX_BITMAP_BYTES) throw new RangeError(`비트맵이 너무 크다: ${w}x${h}`);
+          if (!Number.isFinite(w * h) || w * h * 4 > MAX_BITMAP_BYTES) {
+            throw new RangeError(
+              `렌더 크기가 너무 크다: ${w}x${h}px(${Math.round((w * h * 4) / 1048576)}MB). 상한은 ${MAX_BITMAP_BYTES / 1048576}MB 이다. 배율을 낮춰 주세요.`,
+            );
+          }
           const bmp = L.FPDFBitmap_Create(w, h, 0);
           if (!bmp) throw new Error(`FPDFBitmap_Create 실패: ${w}x${h}`);
           try {
@@ -1003,6 +1007,7 @@ export function createPdfiumAdapter(options: PdfiumAdapterOptions): PdfiumAdapte
       const uniq = [...new Set(pageIndexes)].sort((a, b) => b - a);
       for (const i of uniq) checkIndex(st, i);
       if (uniq.length >= pageCountOf(st)) throw new Error('모든 페이지를 삭제할 수 없다');
+      if (uniq.length === 0) return; // 지운 것이 없으면 '삭제한 데이터가 남음' 표시를 켜지 않는다
       for (const i of uniq) lib().FPDFPage_Delete(st.doc, i);
       st.deletedData = true;
     },
@@ -1258,19 +1263,15 @@ export function createPdfiumAdapter(options: PdfiumAdapterOptions): PdfiumAdapte
     async listFormFields(id) {
       const st = getDoc(id);
       const L = lib();
-      const byName = new Map<string, FormField>();
+      // 계약(adapter.ts FormField): 라디오는 위젯 하나가 필드 하나(이름은 그룹 공통), 나머지는 이름당 첫 위젯 하나
+      const out: FormField[] = [];
+      const seen = new Set<string>();
       scanWidgets(st, (page, w) => {
         const kind = kindOf(w.ftype);
         if (!kind) return;
-        const existing = byName.get(w.name);
-        if (existing) {
-          // 같은 이름의 여러 위젯(라디오 그룹 등)은 하나의 필드로 합친다
-          if (kind === 'radio') {
-            const ev = exportValue(st, w.annot);
-            (existing.options ??= []).push(ev);
-            if (L.FPDFAnnot_IsChecked(st.env, w.annot)) existing.value = ev;
-          }
-          return;
+        if (kind !== 'radio') {
+          if (seen.has(w.name)) return;
+          seen.add(w.name);
         }
         const field: FormField = {
           name: w.name,
@@ -1288,9 +1289,8 @@ export function createPdfiumAdapter(options: PdfiumAdapterOptions): PdfiumAdapte
             field.value = L.FPDFAnnot_IsChecked(st.env, w.annot);
             break;
           case 'radio': {
-            const ev = exportValue(st, w.annot);
-            field.options = [ev];
-            field.value = L.FPDFAnnot_IsChecked(st.env, w.annot) ? ev : null;
+            field.options = [exportValue(st, w.annot)];
+            field.value = L.FPDFAnnot_IsChecked(st.env, w.annot);
             break;
           }
           case 'combo':
@@ -1306,9 +1306,9 @@ export function createPdfiumAdapter(options: PdfiumAdapterOptions): PdfiumAdapte
           default:
             break;
         }
-        byName.set(w.name, field);
+        out.push(field);
       });
-      return [...byName.values()];
+      return out;
     },
 
     async setFormFieldValue(id, fieldName, value) {
@@ -1345,9 +1345,13 @@ export function createPdfiumAdapter(options: PdfiumAdapterOptions): PdfiumAdapte
             return true;
           }
           if (kind === 'radio') {
-            // 같은 이름의 위젯 중 내보내기 값이 일치하는 것을 클릭한다
-            if (typeof value !== 'string') throw typeErr(kind, '내보내기 값(문자열)');
-            if (exportValue(st, w.annot) !== value) return;
+            // 같은 이름의 위젯 중 켜짐 값(options[0])이 일치하는 것을 클릭한다. true 는 이름이 같은 첫 위젯. false 는 아무것도 안 한다
+            if (typeof value !== 'string' && typeof value !== 'boolean') throw typeErr(kind, '켜짐 값(문자열) 또는 boolean');
+            if (value === false) {
+              handled = true;
+              return true;
+            }
+            if (typeof value === 'string' && exportValue(st, w.annot) !== value) return;
             if (!L.FPDFAnnot_IsChecked(st.env, w.annot)) {
               clickWidget(st, page, w.annot);
               if (!L.FPDFAnnot_IsChecked(st.env, w.annot)) throw new Error(`라디오 버튼을 선택하지 못했다: ${fieldName}`);
@@ -1389,7 +1393,9 @@ export function createPdfiumAdapter(options: PdfiumAdapterOptions): PdfiumAdapte
       // 연속 저장: MuPDF 와 달리 PDFium 의 증분 저장은 매번 "열 때의 원본 + 원본 이후 누적 변경" 을 처음부터 다시 쓴다
       //   (실측: 증분 3회·전체 저장 뒤 증분 모두 qpdf 통과, 앞선 변경 유지). 따라서 재기준화가 필요 없고,
       //   증분 저장의 접두 기준은 항상 열 때의 원본이다(MuPDF 는 마지막 저장 결과).
-      // garbageCollect: PDFium 전체 저장은 도달할 수 없는 객체를 이미 정리한다. 별도 동작 없음.
+      // garbageCollect: 별도 동작 없음. PDFium 전체 저장(FPDF_SaveAsCopy flags=0)은 이 플래그와 무관하게 쪽 트리에서 도달할 수 없는
+      //   객체를 쓰지 않는다 — 근거 시험: test/pdfium-adapter.test.mjs '삭제 후 전체 저장은 삭제 쪽 객체를 정리한다'
+      //   (scan.pdf 에서 한 쪽 삭제 뒤 garbageCollect 유무와 관계없이 결과가 원본의 70% 미만이고 같은 크기).
       //   (증분 저장은 원본 접두를 보존하므로 삭제된 쪽의 객체가 파일에 남는다)
       const L = lib();
       const notes: string[] = [];
@@ -1412,7 +1418,7 @@ export function createPdfiumAdapter(options: PdfiumAdapterOptions): PdfiumAdapte
       if (opts.flatten) {
         // 열려 있는 문서를 건드리지 않도록 전체 저장본을 임시로 열어 굽는다. 굽기는 증분이 불가능하다
         notes.push('주석·양식을 내용에 구운 사본이다(편집 중인 문서에는 반영되지 않는다).');
-        return done(flattenBytes(writeCopy(st, 0)), opts.incremental);
+        return done(flattenBytes(writeCopy(st, 0), st.password), opts.incremental);
       }
       if (opts.incremental) {
         let out: Uint8Array | null = null;

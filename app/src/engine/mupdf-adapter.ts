@@ -24,6 +24,9 @@ import type { BinaryRef, BinarySource } from './binary-source';
 import type * as MuPDFTypes from 'mupdf';
 
 type MuPDF = typeof MuPDFTypes;
+
+/** 렌더 비트맵(RGBA) 상한. PDFium 어댑터의 MAX_BITMAP_BYTES 와 같은 값·같은 규칙을 유지한다 */
+const MAX_BITMAP_BYTES = 256 * 1024 * 1024;
 type PDFDocument = MuPDFTypes.PDFDocument;
 type PDFPage = MuPDFTypes.PDFPage;
 type PDFAnnotation = MuPDFTypes.PDFAnnotation;
@@ -277,7 +280,9 @@ export class MupdfAdapter implements EngineAdapter {
       a.setRect(fromRect(d.rect));
       if (type === 'square' || type === 'circle') {
         if (rgb) a.setColor(rgb);
-        a.setBorderWidth(typeof extra.borderWidth === 'number' ? extra.borderWidth : 1);
+        // 갱신에서 borderWidth 가 없으면 기존 값을 유지한다. 새 주석만 기본값 1
+        if (typeof extra.borderWidth === 'number') a.setBorderWidth(extra.borderWidth);
+        else if (isNew) a.setBorderWidth(1);
         const ic = parseHex(extra.interiorColor as string | undefined);
         if (ic) a.setInteriorColor(ic);
       } else if (type === 'text') {
@@ -288,7 +293,9 @@ export class MupdfAdapter implements EngineAdapter {
       }
     }
     if (typeof extra.opacity === 'number') a.setOpacity(extra.opacity);
-    a.setContents(d.contents ?? '');
+    // 갱신에서 contents 가 undefined 면 기존 내용을 보존한다(지우려면 '' 를 넘긴다)
+    if (d.contents !== undefined) a.setContents(d.contents);
+    else if (isNew) a.setContents('');
     a.update();
   }
 
@@ -308,6 +315,16 @@ export class MupdfAdapter implements EngineAdapter {
     return id;
   }
 
+  /** 저장해 JS 힙으로 복사한 뒤 WASM 쪽 Buffer 를 즉시 해제한다(저장마다 문서 크기만큼 새는 것을 막는다) */
+  private saveBytes(pdf: PDFDocument, options: string): Uint8Array {
+    const buf = pdf.saveToBuffer(options);
+    try {
+      return buf.asUint8Array().slice();
+    } finally {
+      buf.destroy();
+    }
+  }
+
   /** 바이트를 열고 로드 중 경고를 모은다(비밀번호 문서는 인증까지) */
   private openBytes(src: Uint8Array, password?: string): Opened {
     const m = this.lib();
@@ -320,14 +337,18 @@ export class MupdfAdapter implements EngineAdapter {
         doc.destroy();
         throw new Error('PDF 문서가 아니다');
       }
-      if (pdf.needsPassword()) {
-        if (!password || !pdf.authenticatePassword(password)) {
-          pdf.destroy();
-          throw new Error(password ? '비밀번호가 틀렸다' : '비밀번호가 필요하다');
+      try {
+        if (pdf.needsPassword()) {
+          if (!password || !pdf.authenticatePassword(password)) {
+            throw new Error(password ? '비밀번호가 틀렸다' : '비밀번호가 필요하다');
+          }
         }
+        pdf.countPages(); // 쪽 트리 로드 중 경고도 모은다
+        return { pdf, warnings, repaired: pdf.wasRepaired() };
+      } catch (e) {
+        pdf.destroy(); // asPDF 이후의 어떤 예외에서도 문서를 놓치지 않는다
+        throw e;
       }
-      pdf.countPages(); // 쪽 트리 로드 중 경고도 모은다
-      return { pdf, warnings, repaired: pdf.wasRepaired() };
     } finally {
       m.setLog(null);
     }
@@ -358,6 +379,13 @@ export class MupdfAdapter implements EngineAdapter {
       const matrix = m.Matrix.scale(scale, scale);
       const b = m.Rect.transform(page.getBounds(), matrix);
       const bbox: MuPDFTypes.Rect = [Math.floor(b[0]), Math.floor(b[1]), Math.ceil(b[2]), Math.ceil(b[3])];
+      const bw = Math.max(1, bbox[2] - bbox[0]);
+      const bh = Math.max(1, bbox[3] - bbox[1]);
+      if (!Number.isFinite(bw * bh) || bw * bh * 4 > MAX_BITMAP_BYTES) {
+        throw new RangeError(
+          `렌더 크기가 너무 크다: ${bw}x${bh}px(${Math.round((bw * bh * 4) / 1048576)}MB). 상한은 ${MAX_BITMAP_BYTES / 1048576}MB 이다. 배율을 낮춰 주세요.`,
+        );
+      }
       // alpha 포함 RGBA pixmap 을 흰색 불투명으로 채운 뒤 주석·위젯 포함 렌더(page.run)
       const pix = new m.Pixmap(m.ColorSpace.DeviceRGB, bbox, true);
       try {
@@ -398,6 +426,7 @@ export class MupdfAdapter implements EngineAdapter {
     const uniq = [...new Set(pageIndexes)].sort((a, b) => b - a); // 내림차순
     for (const i of uniq) this.checkIndex(pdf, i);
     if (uniq.length >= pdf.countPages()) throw new Error(FULL_PAGE_ERR);
+    if (uniq.length === 0) return; // 지운 것이 없으면 '삭제한 데이터가 남음' 표시를 켜지 않는다
     for (const i of uniq) pdf.deletePage(i);
     this.entry(doc).deletedData = true;
   }
@@ -458,28 +487,31 @@ export class MupdfAdapter implements EngineAdapter {
       checkStampImage(im);
       image = new (this.lib().Image)(im.bytes);
     }
-    return this.withPage(doc, pageIndex, (page) => {
-      const a = page.createAnnotation(sub);
-      try {
-        if (image) {
-          a.setStampImage(image); // 이미지로 AP 를 만든다. rect 를 바꾸면 AP 가 그 크기로 늘어나 그려진다
-          a.setRect(fromRect(annot.rect));
-          if (typeof annot.extra?.opacity === 'number') a.setOpacity(annot.extra.opacity);
-          a.setContents(annot.contents ?? '');
-          a.update();
-        } else {
-          this.applyAnnot(a, annot.type, annot);
+    // withPage 가 콜백 전에 던져도(문서·쪽 번호 오류) 이미지는 해제한다
+    try {
+      return this.withPage(doc, pageIndex, (page) => {
+        const a = page.createAnnotation(sub);
+        try {
+          if (image) {
+            a.setStampImage(image); // 이미지로 AP 를 만든다. rect 를 바꾸면 AP 가 그 크기로 늘어나 그려진다
+            a.setRect(fromRect(annot.rect));
+            if (typeof annot.extra?.opacity === 'number') a.setOpacity(annot.extra.opacity);
+            a.setContents(annot.contents ?? '');
+            a.update();
+          } else {
+            this.applyAnnot(a, annot.type, annot);
+          }
+          const res = this.readAnnot(a);
+          if (image) res.extra = { ...res.extra, hasImage: true };
+          return res;
+        } catch (e) {
+          page.deleteAnnotation(a); // 반쪽짜리 주석을 남기지 않는다
+          throw e;
         }
-        const res = this.readAnnot(a);
-        if (image) res.extra = { ...res.extra, hasImage: true };
-        return res;
-      } catch (e) {
-        page.deleteAnnotation(a); // 반쪽짜리 주석을 남기지 않는다
-        throw e;
-      } finally {
-        image?.destroy();
-      }
-    });
+      });
+    } finally {
+      image?.destroy();
+    }
   }
 
   async updateAnnotation(doc: DocId, pageIndex: number, annot: Annotation): Promise<void> {
@@ -599,12 +631,14 @@ export class MupdfAdapter implements EngineAdapter {
     const { pdf } = this.entry(doc);
     const n = pdf.countPages();
     let found = false;
+    let radio = false;
     for (let i = 0; i < n; i++) {
       const page = pdf.loadPage(i);
       try {
         for (const w of page.getWidgets()) {
           if (w.getName() !== fieldName) continue;
           found = true;
+          if (widgetKind(w.getFieldType()) === 'radio') radio = true;
           if (this.setWidget(w, value)) return;
         }
       } finally {
@@ -612,6 +646,8 @@ export class MupdfAdapter implements EngineAdapter {
       }
     }
     if (!found) throw new Error(`양식 필드를 찾을 수 없다: ${fieldName}`);
+    // 라디오: 켜짐 값이 맞는 위젯이 없다. false 는 "아무것도 하지 않음" 이라 오류가 아니다(PDFium 과 같은 계약)
+    if (radio && value !== false) throw new Error(`양식 필드를 찾을 수 없다(또는 값이 맞지 않는다): ${fieldName}`);
   }
 
   /** 값을 적용했으면 true(같은 이름의 다른 위젯은 건드리지 않고 끝낼 수 있음) */
@@ -629,7 +665,8 @@ export class MupdfAdapter implements EngineAdapter {
         return true;
       }
       case 'checkbox': {
-        const want = value === true || (typeof value === 'string' && value !== 'Off' && value !== '');
+        if (typeof value !== 'boolean') throw new TypeError(`checkbox 필드(${w.getName()})의 값은 boolean 이어야 한다`);
+        const want = value;
         const cur = this.readWidget(w, 0).value === true;
         if (want !== cur) w.toggle();
         return true;
@@ -739,7 +776,7 @@ export class MupdfAdapter implements EngineAdapter {
     if (opts.incremental) {
       try {
         if (e.pdf.canBeSavedIncrementally()) {
-          const inc = e.pdf.saveToBuffer('incremental=yes').asUint8Array().slice();
+          const inc = this.saveBytes(e.pdf, 'incremental=yes');
           const chk = this.checkResult(e, inc, wantPages, e.src);
           if (chk.ok && chk.opened) {
             bytes = inc;
@@ -758,7 +795,7 @@ export class MupdfAdapter implements EngineAdapter {
       if (!bytes) fullFallback = true;
     }
     if (!bytes) {
-      const full = e.pdf.saveToBuffer(fullOpts).asUint8Array().slice();
+      const full = this.saveBytes(e.pdf, fullOpts);
       const chk = this.checkResult(e, full, wantPages, null);
       if (!chk.opened || chk.hard) {
         chk.opened?.pdf.destroy();
@@ -790,7 +827,7 @@ export class MupdfAdapter implements EngineAdapter {
         if (incremental) {
           try {
             if (tmp.canBeSavedIncrementally()) {
-              const inc = tmp.saveToBuffer('incremental=yes').asUint8Array().slice();
+              const inc = this.saveBytes(tmp, 'incremental=yes');
               const chk = this.checkResult(e, inc, wantPages, saved);
               chk.opened?.pdf.destroy();
               if (chk.ok) flat = inc;
@@ -804,7 +841,7 @@ export class MupdfAdapter implements EngineAdapter {
           }
         }
         if (!flat) {
-          flat = tmp.saveToBuffer(fullOpts).asUint8Array().slice();
+          flat = this.saveBytes(tmp, fullOpts);
           const chk = this.checkResult(e, flat, wantPages, null);
           chk.opened?.pdf.destroy();
           if (!chk.opened || chk.hard) throw new Error(`평탄화 결과 검증에 실패했다: ${chk.problems.join('; ')}`);

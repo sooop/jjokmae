@@ -10,6 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createPdfiumAdapter } from '../src/engine/pdfium-adapter.ts';
 import { MupdfAdapter } from '../src/engine/mupdf-adapter.ts';
+import { buildRadioPdf } from './form-fixtures.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..', '..');
@@ -322,6 +323,22 @@ describe('페이지 조작', () => {
     const out = await A.save(id, { incremental: false, garbageCollect: true });
     assertQpdfOk(out.bytes, 1);
     assert.ok(out.bytes.length < sc.length * 0.7, `${sc.length} → ${out.bytes.length}`);
+    // garbageCollect 플래그와 무관하게 전체 저장이 정리한다(pdfium-adapter.ts save() 주석의 근거)
+    const plain = await A.save(id, { incremental: false });
+    assert.ok(plain.bytes.length < sc.length * 0.7, `gc 없음: ${sc.length} → ${plain.bytes.length}`);
+    assert.equal(plain.bytes.length, out.bytes.length);
+  });
+
+  test('deletePages([]) 는 아무것도 지우지 않으므로 증분 저장에 삭제 데이터 비고가 붙지 않는다(두 엔진)', async () => {
+    for (const E of [A, M]) {
+      const id = await open(sample('scan'), E);
+      await E.deletePages(id, []);
+      const out = await E.save(id, { incremental: true });
+      assert.ok(!(out.notes ?? []).some((n) => /삭제/.test(n)), `${E.name}: ${JSON.stringify(out.notes)}`);
+      await E.deletePages(id, [1]);
+      const out2 = await E.save(id, { incremental: true });
+      assert.ok((out2.notes ?? []).some((n) => /삭제/.test(n)), `${E.name} 실제 삭제 후에는 비고가 있어야 한다`);
+    }
   });
 });
 
@@ -531,6 +548,42 @@ describe('좌표 규약: 페이지 공간(좌상단 원점, 회전 반영) — M
   });
 });
 
+describe('부분 갱신·렌더 상한: 두 엔진 공통', () => {
+  for (const [label, get] of [['pdfium', () => A], ['mupdf', () => M]]) {
+    test(`${label}: updateAnnotation 에서 contents·borderWidth 가 없으면 기존 값을 유지한다`, async () => {
+      const E = get();
+      const id = await open(sample('ko_embedded'), E);
+      const created = await E.addAnnotation(id, 0, {
+        type: 'square', rect: { x: 60, y: 182, width: 200, height: 60 }, color: '#ff0000', contents: '보존할 메모', extra: { borderWidth: 5 },
+      });
+      // 색·위치만 바꾸는 부분 갱신(contents·extra 없음)
+      await E.updateAnnotation(id, 0, { id: created.id, type: 'square', rect: { x: 70, y: 190, width: 200, height: 60 }, color: '#0000ff' });
+      const after = (await E.listAnnotations(id, 0)).find((a) => a.type === 'square');
+      assert.equal(after.contents, '보존할 메모', '내용 보존');
+      assert.equal(after.rect.x, 70);
+      // 저장본을 MuPDF 로 읽어 선 굵기 확인(PDFium 은 읽기에 borderWidth 를 내지 않는다)
+      const out = await E.save(id, { incremental: false });
+      const re = await open(out.bytes, M);
+      const sq = (await M.listAnnotations(re, 0)).find((a) => a.type === 'square');
+      assert.equal(sq.extra.borderWidth, 5, '선 굵기 유지');
+      // 명시하면 바뀌고, contents '' 는 지운다
+      await E.updateAnnotation(id, 0, { id: created.id, type: 'square', rect: after.rect, color: '#0000ff', contents: '', extra: { borderWidth: 3 } });
+      assert.equal((await E.listAnnotations(id, 0)).find((a) => a.type === 'square').contents ?? '', '');
+      const out2 = await E.save(id, { incremental: false });
+      const re2 = await open(out2.bytes, M);
+      assert.equal((await M.listAnnotations(re2, 0)).find((a) => a.type === 'square').extra.borderWidth, 3);
+    });
+
+    test(`${label}: 렌더 비트맵이 256MB 를 넘으면 이해할 수 있는 RangeError`, async () => {
+      const E = get();
+      const id = await open(sample('ko_embedded'), E);
+      await assert.rejects(() => E.renderPage(id, 0, 40), (e) => e instanceof RangeError && /너무 크다/.test(e.message) && /256MB/.test(e.message) && /배율/.test(e.message));
+      const ok = await E.renderPage(id, 0, 1);
+      assert.ok(ok.width > 100);
+    });
+  }
+});
+
 describe('양식', () => {
   test('form.pdf 텍스트 필드: 목록·값 설정·저장·재로드·그리기', async () => {
     const id = await open(fixture('form'));
@@ -565,14 +618,14 @@ describe('양식', () => {
 
   test('체크박스·라디오·콤보·목록', async () => {
     const id = await open(buildFormPdf());
-    const byName = async () => Object.fromEntries((await A.listFormFields(id)).map((f) => [f.name, f]));
+    // 라디오는 위젯 하나가 필드 하나(이름 공통, options[0]=켜짐 값, value=boolean)라 byName 은 라디오를 빼고 만든다
+    const byName = async () => Object.fromEntries((await A.listFormFields(id)).filter((f) => f.kind !== 'radio').map((f) => [f.name, f]));
+    const radios = async () => (await A.listFormFields(id)).filter((f) => f.kind === 'radio').map((f) => [f.name, f.options[0], f.value]);
     let f = await byName();
-    assert.deepEqual(Object.keys(f), ['name', 'agree', 'color', 'city', 'langs']);
+    assert.deepEqual(Object.keys(f), ['name', 'agree', 'city', 'langs']);
     assert.deepEqual(f.agree.kind, 'checkbox');
     assert.equal(f.agree.value, false);
-    assert.equal(f.color.kind, 'radio');
-    assert.deepEqual(f.color.options, ['red', 'blue']);
-    assert.equal(f.color.value, null);
+    assert.deepEqual(await radios(), [['color', 'red', false], ['color', 'blue', false]]);
     assert.equal(f.city.value, 'Seoul');
     assert.deepEqual(f.city.options, ['Seoul', 'Busan', 'Daegu']);
     assert.deepEqual(f.langs.value, []);
@@ -580,6 +633,7 @@ describe('양식', () => {
     await A.setFormFieldValue(id, 'name', 'abc');
     await A.setFormFieldValue(id, 'agree', true);
     await A.setFormFieldValue(id, 'color', 'blue');
+    assert.deepEqual(await radios(), [['color', 'red', false], ['color', 'blue', true]]);
     await A.setFormFieldValue(id, 'city', 'Busan');
     await A.setFormFieldValue(id, 'langs', ['ko', 'ja']);
     await assert.rejects(() => A.setFormFieldValue(id, 'agree', 'yes'), TypeError);
@@ -587,8 +641,10 @@ describe('양식', () => {
 
     const check = async (bytes) => {
       const re = await open(bytes);
-      const g = Object.fromEntries((await A.listFormFields(re)).map((x) => [x.name, x.value]));
-      assert.deepEqual(g, { name: 'abc', agree: true, color: 'blue', city: 'Busan', langs: ['ko', 'ja'] });
+      const g = Object.fromEntries((await A.listFormFields(re)).filter((x) => x.kind !== 'radio').map((x) => [x.name, x.value]));
+      assert.deepEqual(g, { name: 'abc', agree: true, city: 'Busan', langs: ['ko', 'ja'] });
+      const rr = (await A.listFormFields(re)).filter((x) => x.kind === 'radio').map((x) => [x.options[0], x.value]);
+      assert.deepEqual(rr, [['red', false], ['blue', true]]);
     };
     f = await byName();
     assert.equal(f.agree.value, true);
@@ -600,6 +656,117 @@ describe('양식', () => {
     await A.setFormFieldValue(id, 'agree', false);
     assert.equal((await byName()).agree.value, false);
   });
+});
+
+describe('양식 계약: 두 엔진 공통(라디오 그룹·체크박스)', () => {
+  for (const [label, get] of [['pdfium', () => A], ['mupdf', () => M]]) {
+    test(`${label}: 라디오 3개 그룹에서 두 번째 선택 → 저장 → 재로드`, async () => {
+      const E = get();
+      const id = await open(buildRadioPdf(), E);
+      const radios = async (d) => (await E.listFormFields(d)).filter((f) => f.kind === 'radio');
+      const view = (rs) => rs.map((f) => [f.name, f.options[0], f.value]);
+
+      const r0 = await radios(id);
+      assert.deepEqual(view(r0), [['grp', 'a', false], ['grp', 'b', false], ['grp', 'c', false]], '위젯 단위 필드·boolean·options[0]');
+      assert.ok(r0[0].rect.x < r0[1].rect.x && r0[1].rect.x < r0[2].rect.x, '위젯마다 자기 rect');
+
+      // UI 가 하는 호출: setFormFieldValue(name, field.options[0])
+      await E.setFormFieldValue(id, 'grp', r0[1].options[0]);
+      assert.deepEqual(view(await radios(id)), [['grp', 'a', false], ['grp', 'b', true], ['grp', 'c', false]]);
+      // 이미 선택된 값을 다시 선택해도 그대로
+      await E.setFormFieldValue(id, 'grp', 'b');
+      assert.deepEqual((await radios(id)).map((f) => f.value), [false, true, false]);
+
+      for (const incremental of [false, true]) {
+        const out = await E.save(id, { incremental });
+        assertQpdfOk(out.bytes, 1);
+        const re = await open(out.bytes, E);
+        assert.deepEqual(view(await radios(re)), [['grp', 'a', false], ['grp', 'b', true], ['grp', 'c', false]], `재로드(incremental=${incremental})`);
+      }
+      // 다른 위젯으로 옮기면 두 번째는 해제된다
+      await E.setFormFieldValue(id, 'grp', 'c');
+      assert.deepEqual((await radios(id)).map((f) => f.value), [false, false, true]);
+    });
+
+    test(`${label}: 라디오 set 의 경계(true=첫 위젯, false=무동작, 없는 값=오류)와 체크박스 boolean 전용`, async () => {
+      const E = get();
+      const id = await open(buildRadioPdf(), E);
+      const vals = async () => (await E.listFormFields(id)).filter((f) => f.kind === 'radio').map((f) => f.value);
+      await E.setFormFieldValue(id, 'grp', true);
+      assert.deepEqual(await vals(), [true, false, false]);
+      await E.setFormFieldValue(id, 'grp', false);
+      assert.deepEqual(await vals(), [true, false, false], 'false 는 무동작');
+      await assert.rejects(() => E.setFormFieldValue(id, 'grp', 'zzz'), /찾을 수 없다/);
+      assert.deepEqual(await vals(), [true, false, false]);
+
+      const chk = async () => (await E.listFormFields(id)).find((f) => f.name === 'chk');
+      assert.equal((await chk()).kind, 'checkbox');
+      assert.equal((await chk()).value, false);
+      await assert.rejects(() => E.setFormFieldValue(id, 'chk', 'Yes'), TypeError);
+      await assert.rejects(() => E.setFormFieldValue(id, 'chk', 'Off'), TypeError);
+      await E.setFormFieldValue(id, 'chk', true);
+      assert.equal((await chk()).value, true);
+      await E.setFormFieldValue(id, 'chk', false);
+      assert.equal((await chk()).value, false);
+    });
+  }
+});
+
+describe('암호 PDF 저장: 두 엔진 공통', { skip: !hasQpdf && 'qpdf 없음' }, () => {
+  const encrypted = (keyBits, extra = []) => {
+    const src = path.join(os.tmpdir(), `enc-src-${process.pid}-${keyBits}.pdf`);
+    const dst = path.join(os.tmpdir(), `enc-dst-${process.pid}-${keyBits}.pdf`);
+    fs.writeFileSync(src, sample('ko_embedded'));
+    const r = spawnSync('qpdf', ['--encrypt', 'secret', 'owner', String(keyBits), ...extra, '--', src, dst], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    const bytes = new Uint8Array(fs.readFileSync(dst));
+    fs.rmSync(src, { force: true });
+    fs.rmSync(dst, { force: true });
+    return bytes;
+  };
+  for (const [label, get] of [['pdfium', () => A], ['mupdf', () => M]]) {
+    for (const [bits, extra] of [[256, []], [128, ['--use-aes=y']]]) {
+      test(`${label}: AES-${bits} 암호 PDF — 증분·전체·굽기 저장이 실패하거나 거짓 폴백하지 않는다`, async () => {
+        const E = get();
+        const orig = encrypted(bits, extra);
+        const opts = { password: 'secret' };
+        const id = await E.open(orig, opts);
+        opened.push([E, id]);
+        const pages = await E.pageCount(id);
+        await E.addAnnotation(id, 0, { type: 'square', rect: { x: 50, y: 50, width: 80, height: 40 }, color: '#ff0000', contents: 'enc-note' });
+
+        const inc = await E.save(id, { incremental: true });
+        assert.equal(inc.fullFallback, false, '암호 PDF 의 증분 저장이 전체 저장으로 내려가면 안 된다');
+        assert.ok(startsWith(inc.bytes, orig), '원본 접두 보존');
+        const full = await E.save(id, { incremental: false });
+        const flat = await E.save(id, { incremental: false, flatten: true });
+        for (const [name, out] of [['inc', inc], ['full', full], ['flat', flat]]) {
+          const f = path.join(os.tmpdir(), `enc-out-${process.pid}-${label}-${bits}-${name}.pdf`);
+          fs.writeFileSync(f, out.bytes);
+          try {
+            const c = spawnSync('qpdf', ['--password=secret', '--check', f], { encoding: 'utf8' });
+            assert.equal(c.status, 0, `${name}: ` + c.stdout + c.stderr);
+            const n = spawnSync('qpdf', ['--password=secret', '--show-npages', f], { encoding: 'utf8' });
+            assert.equal(Number(n.stdout.trim()), pages, name);
+            const e = spawnSync('qpdf', ['--password=secret', '--show-encryption', f], { encoding: 'utf8' }).stdout;
+            assert.doesNotMatch(e, /File is not encrypted/, `${name}: 암호화 유지`);
+          } finally {
+            fs.rmSync(f, { force: true });
+          }
+        }
+        // 재로드: 암호로 열리고 주석이 남는다(굽기본은 주석이 내용이 된다)
+        for (const out of [inc, full]) {
+          const re = await E.open(out.bytes, opts);
+          opened.push([E, re]);
+          assert.ok((await E.listAnnotations(re, 0)).some((a) => a.contents === 'enc-note'));
+        }
+        const rf = await E.open(flat.bytes, opts);
+        opened.push([E, rf]);
+        assert.equal((await E.listAnnotations(rf, 0)).length, 0, '굽기본에는 주석 객체가 남지 않는다');
+        await assert.rejects(() => E.open(full.bytes), /암호|비밀번호/);
+      });
+    }
+  }
 });
 
 describe('서명 PDF 증분 저장', () => {

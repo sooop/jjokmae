@@ -22,7 +22,8 @@ function engineBinaries(target: Target): Plugin {
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         const m = /^\/engines\/([^/?#]+)/.exec(req.url ?? '');
-        const src = m && ENGINE_FILES[m[1]];
+        // 'constructor'·'__proto__' 같은 상속 키가 함수로 잡히지 않도록 자기 속성만 본다
+        const src = m && Object.hasOwn(ENGINE_FILES, m[1]) ? ENGINE_FILES[m[1]] : null;
         if (!src) return next();
         res.setHeader('Content-Type', 'application/wasm');
         res.end(readFileSync(src()));
@@ -61,7 +62,11 @@ function mupdfNoWasmAsset(): Plugin {
       for (const r of rules) {
         if (!r.file.test(id)) continue;
         const out = code.replace(r.re, r.to);
-        if (out !== code) return { code: out, map: null };
+        if (out === code) {
+          // 라이브러리 업데이트로 패턴이 바뀌면 WASM 이 조용히 에셋으로 인라인/복사된다 → 빌드를 실패시켜 알린다
+          this.error(`mupdf-no-wasm-asset: ${id} 에서 WASM URL 패턴(${r.re.source})을 찾지 못했다. 라이브러리 버전이 바뀌어 치환 규칙을 갱신해야 한다.`);
+        }
+        return { code: out, map: null };
       }
       return null;
     },

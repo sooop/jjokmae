@@ -9,8 +9,9 @@ import type { DocId, PageSize, Rotation } from '../engine/adapter';
 import type { EngineKind } from '../engine/protocol';
 import type { EngineClient } from '../engine/worker-client';
 import { baseName, downloadBytes, editedName } from './download';
-import { bootEngine, bootErrorMessage } from './engine-boot';
-import { HistoryPool, UndoHistory, type HasBytes } from './history';
+import { bootEngine, bootErrorMessage, ENGINE_LABEL } from './engine-boot';
+import { EnginePool } from './engine-pool';
+import { GhostStore, HistoryPool, UndoHistory, type HasBytes } from './history';
 import { addRotation, applyOrder, currentAfterDelete, detectRotation, dropOrder, isIdentity } from './page-ops';
 import { splitNames } from './ranges';
 import { RenderScheduler } from './render-queue';
@@ -56,6 +57,19 @@ class OpenError extends Error {
   }
 }
 
+/** 엔진 워커가 죽어서 실패했다(파일이 손상된 것이 아니다) */
+class EngineStoppedError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+  }
+}
+
+/** 열린 파일이 MAX_DOCS 개라 더 늘릴 수 없다 */
+class DocLimitError extends Error {}
+
+/** 엔진 클라이언트(워커)가 죽었는가: worker-client 의 읽기 전용 dead */
+const clientDead = (c: EngineClient): boolean => c.dead;
+
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const sorted = (pages: number[]) => [...new Set(pages)].sort((a, b) => a - b);
 
@@ -64,6 +78,8 @@ export class DocState {
   readonly key: number;
   /** 이 문서를 연 엔진. 설정을 바꿔도 이 문서는 그대로 쓴다 */
   readonly kind: EngineKind;
+  /** 이 문서를 연 엔진 인스턴스. 엔진이 죽어 같은 종류로 다시 띄워도 이 문서는 옛(죽은) 인스턴스로만 다룬다 — 새 워커에 옛 id 를 보내지 않게 */
+  client!: EngineClient;
   /** 엔진 문서 ID. rebase 할 때마다 바뀐다 */
   id: DocId = '';
   name = $state('');
@@ -84,8 +100,6 @@ export class DocState {
   /** 정리 모드 격자의 스크롤 위치 */
   gridScroll = 0;
   rot: RotState = [];
-  /** 마지막 rebase 가 만든 바이트(원본 ⊂ 저장본 사슬의 기준) */
-  base: Uint8Array | null = null;
   stateId = $state(0);
   savedStateId = $state(0);
   /** 이 문서를 연 뒤 쪽을 삭제한 적이 있는가(저장 안내 문구용) */
@@ -157,8 +171,8 @@ export class Workspace {
   hooks: WorkspaceHooks;
   readonly pool = new HistoryPool();
 
-  private engines = new Map<EngineKind, EngineClient>();
-  private opening: EngineKind | null = null;
+  /** 엔진 종류별 인스턴스·동시 기동 합치기·사용 중(열기·되살리기·인쇄 임시 문서) 표시 */
+  private enginePool: EnginePool<EngineKind, EngineClient>;
   private keySeq = 0;
   private genSeq = 0;
   private stateSeq = 0;
@@ -167,10 +181,24 @@ export class Workspace {
   private openChain: Promise<unknown> = Promise.resolve();
   private editChain: Promise<unknown> = Promise.resolve();
   /** 이동 묶음 번호 → 되돌리기로 닫힌 새 탭의 내용(다시하기로 되살리기 위해) */
-  private ghosts = new Map<number, { name: string; kind: EngineKind; bytes: Uint8Array; rot: RotState; zoom: number }>();
+  private ghosts = new GhostStore<{ name: string; kind: EngineKind; bytes: Uint8Array; rot: RotState; zoom: number }>();
 
   constructor(hooks: WorkspaceHooks) {
     this.hooks = hooks;
+    this.enginePool = new EnginePool<EngineKind, EngineClient>((kind) => this.bootKind(kind), clientDead);
+    // 상한(128MB)으로 버려진 새 탭은 다시하기로 되살릴 수 없으므로, 그 묶음의 다시하기 단계도 함께 없앤다
+    this.ghosts.onEvict = (bundle) => this.invalidateRedo(bundle);
+  }
+
+  /** 묶음 번호 bundle 의 다시하기 단계를 모든 문서에서 없앤다(그 단계와 그보다 나중 단계는 더 이을 수 없다) */
+  private invalidateRedo(bundle: number) {
+    for (const d of this.docs) {
+      const i = d.history.redoStack.findIndex((s) => s.bundle === bundle);
+      if (i >= 0) {
+        d.history.dropRedoThrough(i);
+        d.syncHistory();
+      }
+    }
   }
 
   get active(): DocState | null {
@@ -180,20 +208,20 @@ export class Workspace {
     return this.docs.find((d) => d.key === key);
   }
   clientOf(d: DocState): EngineClient {
-    const c = this.engines.get(d.kind);
-    if (!c) throw new Error('엔진이 종료되었다');
-    return c;
+    return d.client;
+  }
+  /** 같은 엔진 인스턴스에서 연 문서끼리인가(엔진이 죽어 다시 뜬 경우 종류가 같아도 다른 인스턴스다) */
+  private sameEngine(a: DocState, b: DocState): boolean {
+    return a.client === b.client;
   }
   /** 지금 떠 있는 엔진 종류(시험·진단용) */
   get engineKinds(): EngineKind[] {
-    return [...this.engines.keys()];
+    return this.enginePool.kinds();
   }
 
   // ---------- 엔진 ----------
-  private async acquire(kind: EngineKind): Promise<EngineClient> {
-    const have = this.engines.get(kind);
-    if (have) return have;
-    const c = await bootEngine(kind, {
+  private bootKind(kind: EngineKind): Promise<EngineClient> {
+    return bootEngine(kind, {
       confirmDownload: (ref) =>
         new Promise<boolean>((resolve) => {
           this.status = { phase: 'confirm', engine: kind, ref, decide: (ok) => { this.status = null; resolve(ok); } };
@@ -205,17 +233,16 @@ export class Workspace {
             : { phase: 'download', engine: kind, loaded: p.loaded, total: p.total };
       },
     });
-    this.engines.set(kind, c);
-    return c;
   }
 
-  /** 열린 문서가 없는 엔진은 해제한다 */
+  /** 엔진을 얻는다. 같은 종류의 동시 기동은 합쳐지고, 죽은 엔진은 폐기하고 새로 띄운다 */
+  private acquire(kind: EngineKind): Promise<EngineClient> {
+    return this.enginePool.acquire(kind);
+  }
+
+  /** 열린 문서가 없고 쓰는 중(열기·되살리기·인쇄 임시 문서)도 아닌 엔진은 해제한다 */
   private releaseUnusedEngines() {
-    for (const [kind, c] of [...this.engines]) {
-      if (this.opening === kind || this.docs.some((d) => d.kind === kind)) continue;
-      c.dispose();
-      this.engines.delete(kind);
-    }
+    this.enginePool.releaseUnused((kind) => this.docs.some((d) => d.kind === kind));
   }
 
   private async readSizes(c: EngineClient, id: DocId): Promise<PageSize[]> {
@@ -227,14 +254,17 @@ export class Workspace {
     this.pagesNotice = this.saveNotice = this.splitNotice = this.editNotice = null;
   }
 
-  private async waitIdle() {
+  /** 조작이 끝나길 기다린다(최대 60초). 끝났으면 true, 시간이 지나도 조작 중이면 false */
+  private async waitIdle(): Promise<boolean> {
     const t0 = Date.now();
     while (this.opBusy && Date.now() - t0 < 60000) await new Promise((r) => setTimeout(r, 30));
+    return !this.opBusy;
   }
 
   // ---------- 문서 목록 ----------
-  private makeDoc(kind: EngineKind, id: DocId, name: string, sizes: PageSize[], rot: RotState, zoom: number): DocState {
+  private makeDoc(client: EngineClient, kind: EngineKind, id: DocId, name: string, sizes: PageSize[], rot: RotState, zoom: number): DocState {
     const d = new DocState(++this.keySeq, kind, this.pool);
+    d.client = client;
     d.id = id;
     d.name = name;
     d.sizes = sizes;
@@ -242,7 +272,7 @@ export class Workspace {
     d.rot = Array.from({ length: sizes.length }, (_, i) => rot[i] ?? null);
     d.zoom = zoom;
     d.gen = ++this.genSeq;
-    d.scheduler = new RenderScheduler(this.engines.get(kind)!, id, 2);
+    d.scheduler = new RenderScheduler(client, id, 2);
     d.history.ondrop = (st) => {
       d.syncHistory();
       if (st.bundle != null) this.ghosts.delete(st.bundle);
@@ -250,8 +280,18 @@ export class Workspace {
     return d;
   }
 
-  private addDoc(d: DocState) {
+  /** 문서를 목록에 넣는다. 열린 파일이 MAX_DOCS 개면 넣지 않고 false(호출자가 엔진 문서·기록을 정리한다) */
+  private addDoc(d: DocState): boolean {
+    if (this.docs.length >= MAX_DOCS) return false;
     this.docs = [...this.docs, d];
+    return true;
+  }
+
+  /** 목록에 넣지 못한(또는 넣기 전에 버리는) 문서의 엔진 문서·기록·스케줄러를 정리한다 */
+  private async discardDoc(d: DocState) {
+    d.scheduler.dispose();
+    d.history.dispose();
+    await d.client.close(d.id).catch(() => {});
   }
 
   activate(key: number) {
@@ -324,9 +364,24 @@ export class Workspace {
         last = await this.openOne(f);
         opened++;
       } catch (e) {
-        if (e instanceof OpenError) {
+        if (e instanceof DocLimitError) {
+          refused.push(f.name);
+        } else if (e instanceof OpenError) {
           if (/비밀번호|password|암호/i.test(e.message)) encrypted.push(f.name);
           else broken.push({ name: f.name, detail: e.message });
+        } else if (e instanceof EngineStoppedError) {
+          // 워커가 죽어서 실패한 것: 파일 탓이 아니다. 이 종류로 열려 있던 문서는 죽은 엔진에 매여 있어 더는 쓸 수 없다
+          const kind = this.hooks.settings().engine;
+          const rest = files.slice(i);
+          const stale = this.docs.some((x) => x.kind === kind);
+          this.status = {
+            phase: 'error',
+            message: `${ENGINE_LABEL[kind]} 엔진이 멈춰서 파일을 열지 못했습니다. 다시 시도해 주세요.${stale ? ' 이미 열려 있던 파일은 작업할 수 없으니 닫고 다시 열어 주세요.' : ''}`,
+            detail: e.message,
+            retry: () => void this.openFiles(rest),
+          };
+          aborted = true;
+          break;
         } else {
           const kind = this.hooks.settings().engine;
           const m = bootErrorMessage(e, kind);
@@ -358,29 +413,34 @@ export class Workspace {
 
   private async openOne(file: File): Promise<DocState> {
     const kind = this.hooks.settings().engine;
-    this.opening = kind;
+    this.enginePool.pin(kind);
     try {
       const c = await this.acquire(kind);
       this.status = { phase: 'opening', name: file.name };
       const buf = await file.arrayBuffer();
+      // 워커 사망으로 실패한 것은 '손상된 PDF' 가 아니다
+      const fail = (e: unknown) => (clientDead(c) ? new EngineStoppedError(e) : new OpenError(e));
       let id: DocId;
       try {
         id = await c.open(buf);
       } catch (e) {
-        throw new OpenError(e);
+        throw fail(e);
       }
       let sizes: PageSize[];
       try {
         sizes = await this.readSizes(c, id);
       } catch (e) {
         await c.close(id).catch(() => {});
-        throw new OpenError(e);
+        throw fail(e);
       }
-      const d = this.makeDoc(kind, id, uniqueName(this.docs.map((x) => x.name), file.name), sizes, [], this.hooks.settings().zoom);
-      this.addDoc(d);
+      const d = this.makeDoc(c, kind, id, uniqueName(this.docs.map((x) => x.name), file.name), sizes, [], this.hooks.settings().zoom);
+      if (!this.addDoc(d)) {
+        await this.discardDoc(d);
+        throw new DocLimitError();
+      }
       return d;
     } finally {
-      this.opening = null;
+      this.enginePool.unpin(kind);
       this.releaseUnusedEngines();
     }
   }
@@ -394,7 +454,17 @@ export class Workspace {
       this.confirmClose = { key, busy: false };
       return;
     }
-    await this.waitIdle();
+    if (!(await this.waitIdle())) {
+      // 60초가 지나도 다른 조작이 끝나지 않았다: 조작 중인 문서를 지우지 않고 알린다
+      if (this.confirmClose?.key === key) this.confirmClose = null;
+      this.tabNotice = {
+        key,
+        kind: 'error',
+        text: `‘${d.name}’을(를) 닫지 못했습니다. 다른 작업이 아직 끝나지 않았으니 끝난 뒤 다시 닫아 주세요.`,
+        reassure: '파일은 그대로 열려 있습니다.',
+      };
+      return;
+    }
     await this.removeDoc(d);
   }
 
@@ -414,8 +484,7 @@ export class Workspace {
       this.clearNotices();
       this.hooks.afterInstall?.(next);
     }
-    const c = this.engines.get(d.kind);
-    await c?.close(d.id).catch(() => {});
+    await d.client.close(d.id).catch(() => {});
     this.releaseUnusedEngines();
   }
 
@@ -430,21 +499,19 @@ export class Workspace {
     const r = await c.save(d.id, { incremental: true });
     const id2 = await c.open(r.bytes.slice());
     const oldId = d.id;
-    d.scheduler.dispose();
     d.id = id2;
-    d.scheduler = new RenderScheduler(c, id2, 2);
-    d.base = r.bytes;
+    // 스케줄러는 새로 만들지 않는다(화면 재생성 gen 이 오르지 않아 대기·진행 중이던 렌더가 빈 칸으로 남는다). 문서 id 만 바꾼다
+    d.scheduler.rebind(id2);
     await c.close(oldId).catch(() => {});
     return r;
   }
 
-  /** rebase 한 라이브 문서를 같은 바이트로 다시 열어 갈아탄다(화면은 그대로 두고 id·스케줄러만 바꾼다) */
+  /** rebase 한 라이브 문서를 같은 바이트로 다시 열어 갈아탄다(화면은 그대로 두고 id 만 바꾼다) */
   private async swapLive(c: EngineClient, d: DocState, bytes: Uint8Array) {
     const id2 = await c.open(bytes.slice());
     const oldId = d.id;
-    d.scheduler.dispose();
     d.id = id2;
-    d.scheduler = new RenderScheduler(c, id2, 2);
+    d.scheduler.rebind(id2);
     await c.close(oldId).catch(() => {});
   }
 
@@ -473,19 +540,40 @@ export class Workspace {
     d.start = start;
     d.current = start;
     d.selected = sel.filter((s) => s >= 0 && s < n);
-    if (d.anchor != null && d.anchor >= n) d.anchor = null;
+    // 순서 변경·되돌리기로 쪽 번호가 가리키는 쪽이 바뀌므로 옛 기준점은 쓸 수 없다: 새 선택의 첫 쪽으로 다시 잡는다
+    d.anchor = d.selected.length ? d.selected[0] : null;
     d.scroll = null;
     d.rev = sizes.map(() => 0);
     d.scheduler = new RenderScheduler(c, id, 2);
     d.gen = ++this.genSeq;
     if (oldId !== id) await c.close(oldId).catch(() => {});
-    if (d.key === this.activeKey) this.hooks.afterInstall?.(d);
+    if (d.key === this.activeKey) {
+      try {
+        this.hooks.afterInstall?.(d);
+      } catch (e) {
+        // 문서는 이미 갈아탔다. 화면 훅의 오류로 조작 전체를 실패로 만들지 않는다
+        console.error(e);
+      }
+    }
+  }
+
+  /**
+   * 바이트를 새로 열어 화면 상태로 만든다. 설치에 실패하면 방금 연 엔진 문서를 닫는다(누수 방지).
+   * 설치에 실패해도 d.id 는 그대로다.
+   */
+  private async installFresh(d: DocState, bytes: Uint8Array, rot: RotState, cur: number, sel: number[]) {
+    const c = this.clientOf(d);
+    const id = await c.open(bytes.slice());
+    try {
+      await this.installDoc(d, id, rot, cur, sel);
+    } catch (e) {
+      if (d.id !== id) await c.close(id).catch(() => {});
+      throw e;
+    }
   }
 
   private async restoreSnap(d: DocState, snap: Snap) {
-    const c = this.clientOf(d);
-    const id = await c.open(snap.bytes.slice());
-    await this.installDoc(d, id, snap.rot, snap.current, snap.selected);
+    await this.installFresh(d, snap.bytes, snap.rot, snap.current, snap.selected);
   }
 
   /**
@@ -509,8 +597,9 @@ export class Workspace {
     d.scheduler.dispose();
     try {
       const res = await fn(c, d, snap);
-      this.pushHistory(d, snap, bundle);
+      // 설치가 끝난 뒤에 기록한다(설치가 실패하면 아래에서 조작 전 상태로 복구하므로, 먼저 기록하면 기록만 남는다)
       await this.installDoc(d, d.id, res.rot, res.current, res.selected);
+      this.pushHistory(d, snap, bundle);
       return true;
     } catch (e) {
       try {
@@ -569,10 +658,10 @@ export class Workspace {
       }
       d.scheduler.dispose();
       try {
-        const id = await c.open(target.bytes.slice());
+        // 열기·설치가 모두 성공한 뒤에 기록·stateId 를 바꾼다(실패하면 설치하다 만 id 는 installFresh 가 닫는다)
+        await this.installFresh(d, target.bytes, target.rot, target.current, target.selected);
         put(cur);
         d.stateId = target.stateId;
-        await this.installDoc(d, id, target.rot, target.current, target.selected);
         return true;
       } catch (e) {
         putBack();
@@ -604,6 +693,11 @@ export class Workspace {
     try {
       const top = (dir === 'undo' ? h.undoStack : h.redoStack).at(-1)!;
       const bundle = top.bundle;
+      // 복사·병합으로 만든 새 파일(짝 문서 없음)은 시작 지점에서 탭을 닫지 않는다. 닫으면 다시하기로 되살릴 곳이 없어 내용을 잃는다
+      if (dir === 'undo' && top.create && bundle == null) {
+        this.tabNotice = { key: d.key, kind: 'info', text: `‘${d.name}’을(를) 만든 시점까지 되돌렸습니다. 더 되돌릴 단계가 없습니다.` };
+        return;
+      }
       let partners: DocState[] = [];
       if (bundle != null) {
         const probe = this.docs.map((x) => ({ key: x.key, stack: dir === 'undo' ? x.history.undoStack : x.history.redoStack }));
@@ -621,27 +715,50 @@ export class Workspace {
         partners = r.partners.map((k) => this.docOf(k)!);
       }
 
+      // 다시하기로 닫았던 새 탭을 되살려야 하는데 이미 열린 파일이 가득이면, 아무것도 바꾸기 전에 막는다
+      // (먼저 원본 쪽을 다시 적용한 뒤에야 탭을 못 여는 어긋남을 피한다)
+      if (dir === 'redo' && bundle != null && this.ghosts.has(bundle) && this.docs.length >= MAX_DOCS) {
+        this.pagesNotice = {
+          kind: 'error',
+          text: `열린 파일이 ${MAX_DOCS}개라 닫았던 새 파일을 다시 열 수 없어 다시하기를 하지 못했습니다. 탭을 하나 닫은 뒤 다시하기를 눌러 주세요.`,
+          reassure: '문서는 그대로입니다.',
+        };
+        return;
+      }
+
       // 새 파일의 시작 지점을 되돌리면 그 탭은 닫는다(내용은 다시하기를 위해 따로 남긴다)
       const all = [d, ...partners];
       const closing: DocState[] = [];
       const done: DocState[] = [];
       for (const x of all) {
         const topx = (dir === 'undo' ? x.history.undoStack : x.history.redoStack).at(-1)!;
+        let ok = true;
         if (dir === 'undo' && topx.create) {
+          // 새 탭이 닫히기 전에 내용을 남긴다. 이 저장이 실패해도 아래 롤백과 같은 경로로 처리한다
           if (bundle != null) {
-            const cur = await this.takeSnap(this.clientOf(x), x);
-            this.ghosts.set(bundle, { name: x.name, kind: x.kind, bytes: cur.bytes, rot: cur.rot, zoom: x.zoom });
+            try {
+              const cur = await this.takeSnap(this.clientOf(x), x);
+              this.ghosts.set(bundle, { name: x.name, kind: x.kind, bytes: cur.bytes, rot: cur.rot, zoom: x.zoom });
+            } catch (e) {
+              this.pagesNotice = { kind: 'error', text: '되돌리기에 실패했습니다.', reassure: '문서는 그대로입니다.', detail: errText(e) };
+              ok = false;
+            }
           }
-          closing.push(x);
-          continue;
+          if (ok) {
+            closing.push(x);
+            continue;
+          }
+        } else {
+          ok = await this.stepDoc(x, dir);
+          if (ok) {
+            done.push(x);
+            continue;
+          }
         }
-        if (await this.stepDoc(x, dir)) done.push(x);
-        else {
-          // 한쪽이 실패하면 먼저 바꾼 문서를 원래대로 돌려 두 문서의 어긋남을 막는다
-          for (const q of done) await this.stepDoc(q, dir === 'undo' ? 'redo' : 'undo');
-          if (bundle != null) this.ghosts.delete(bundle);
-          return;
-        }
+        // 한쪽이 실패하면 먼저 바꾼 문서를 원래대로 돌려 두 문서의 어긋남을 막는다
+        for (const q of done) await this.stepDoc(q, dir === 'undo' ? 'redo' : 'undo');
+        if (bundle != null) this.ghosts.delete(bundle);
+        return;
       }
       const survivors = partners.filter((p) => !closing.includes(p));
       const initiatorClosed = closing.includes(d);
@@ -671,20 +788,30 @@ export class Workspace {
     const g = this.ghosts.get(bundle);
     if (!g) return null;
     this.ghosts.delete(bundle);
-    this.opening = g.kind;
+    this.enginePool.pin(g.kind);
     try {
       const c = await this.acquire(g.kind);
       const id = await c.open(g.bytes.slice());
-      const sizes = await this.readSizes(c, id);
-      const d = this.makeDoc(g.kind, id, uniqueName(this.docs.map((x) => x.name), g.name), sizes, g.rot, g.zoom);
-      this.markNew(d, bundle);
-      this.addDoc(d);
-      return d;
+      try {
+        const sizes = await this.readSizes(c, id);
+        const d = this.makeDoc(c, g.kind, id, uniqueName(this.docs.map((x) => x.name), g.name), sizes, g.rot, g.zoom);
+        this.markNew(d, bundle);
+        if (!this.addDoc(d)) {
+          await this.discardDoc(d);
+          this.pagesNotice = { kind: 'error', text: `열린 파일이 ${MAX_DOCS}개라 닫았던 새 파일을 다시 열지 못했습니다. 이 새 파일의 내용은 되살릴 수 없습니다.` };
+          return null;
+        }
+        return d;
+      } catch (e) {
+        await c.close(id).catch(() => {});
+        throw e;
+      }
     } catch (e) {
       this.pagesNotice = { kind: 'error', text: '닫았던 새 파일을 다시 열지 못했습니다.', detail: errText(e) };
       return null;
     } finally {
-      this.opening = null;
+      this.enginePool.unpin(g.kind);
+      this.releaseUnusedEngines();
     }
   }
 
@@ -711,7 +838,15 @@ export class Workspace {
       const t0 = Date.now();
       while (this.opBusy && Date.now() - t0 < 30000) await new Promise((r) => setTimeout(r, 30));
       const d = d0;
-      if (!d || !this.docs.includes(d) || this.opBusy || d.gen !== gen0) return { ok: false };
+      if (!d) return { ok: false };
+      // 대기하는 동안 조건이 바뀌어 편집을 반영하지 못하면 알린다(알림 없이 버리지 않는다)
+      const dropped = (why: string, todo: string) => {
+        this.editNotice = { kind: 'error', text: `${what} 내용을 반영하지 못했습니다. ${why}`, reassure: todo };
+        return { ok: false } as R;
+      };
+      if (!this.docs.includes(d)) return dropped('편집하던 파일이 그 사이 닫혔습니다.', '필요하면 파일을 다시 열어 편집해 주세요.');
+      if (this.opBusy) return dropped('다른 작업이 오래 끝나지 않았습니다.', '그 작업이 끝난 뒤 다시 입력해 주세요.');
+      if (d.gen !== gen0) return dropped('그 사이 쪽 구성이 바뀌어 편집이 취소되었습니다.', '바뀐 화면에서 다시 입력해 주세요.');
       this.opBusy = true;
       this.editNotice = null;
       const c = this.clientOf(d);
@@ -903,16 +1038,14 @@ export class Workspace {
 
   // ---------- 쪽 보내기 ----------
   /** 새 파일 탭을 만든다: 바이트를 엔진에서 열어 변경됨 상태로 둔다 */
-  private async createNewDoc(kind: EngineKind, bytes: Uint8Array, rot: RotState, bundle?: number): Promise<DocState> {
-    const c = this.engines.get(kind)!;
+  private async createNewDoc(c: EngineClient, kind: EngineKind, bytes: Uint8Array, rot: RotState, bundle?: number): Promise<DocState> {
     const id = await c.open(bytes.slice());
     try {
       const sizes = await this.readSizes(c, id);
       const { name, n } = newDocName(this.docs.map((x) => x.name), this.newSeq);
       this.newSeq = n + 1;
-      const d = this.makeDoc(kind, id, name, sizes, rot, this.hooks.settings().zoom);
+      const d = this.makeDoc(c, kind, id, name, sizes, rot, this.hooks.settings().zoom);
       this.markNew(d, bundle);
-      d.base = bytes;
       return d;
     } catch (e) {
       await c.close(id).catch(() => {});
@@ -958,18 +1091,22 @@ export class Workspace {
         let created: DocState;
         try {
           const [bytes] = await this.buildSubsets(cs, S, [pages], false);
-          created = await this.createNewDoc(S.kind, bytes, pages.map((i) => S.rot[i]), bundle);
+          created = await this.createNewDoc(cs, S.kind, bytes, pages.map((i) => S.rot[i]), bundle);
         } catch (e) {
           this.pagesNotice = { kind: 'error', text: '새 파일을 만들지 못했습니다. 다시 시도해 주세요.', reassure: '열려 있는 문서는 그대로입니다.', detail: errText(e) };
           return false;
         }
         if (move && !(await this.deleteAfterMove(S, pages, bundle!))) {
-          created.scheduler.dispose();
-          await cs.close(created.id).catch(() => {});
-          created.history.dispose();
+          await this.discardDoc(created);
           return false;
         }
-        this.addDoc(created);
+        if (!this.addDoc(created)) {
+          // 이동 도중 다른 경로로 파일이 늘어 가득 찼다: 원본에서 지운 것을 되돌려 쪽이 사라지지 않게 한다
+          await this.discardDoc(created);
+          if (move) await this.undoMoveHalf(S);
+          this.pagesNotice = { kind: 'error', text: `열린 파일이 ${MAX_DOCS}개라 새 파일을 만들 수 없습니다. 탭을 닫고 다시 시도해 주세요.`, reassure: '열려 있는 문서는 그대로입니다.' };
+          return false;
+        }
         this.activate(created.key);
         return true;
       }
@@ -978,7 +1115,13 @@ export class Workspace {
       const t = T!;
       const tgt = spec.target;
       if (t === S) {
-        const at = insertIndex(tgt.pos, S.total);
+        let at: number;
+        try {
+          at = insertIndex(tgt.pos, S.total);
+        } catch {
+          this.pagesNotice = { kind: 'error', text: `‘${S.name}’은(는) ${S.total}쪽까지 있습니다. 쪽 번호를 확인해 주세요.` };
+          return false;
+        }
         if (move) {
           const order = dropOrder(S.total, pages, at);
           if (isIdentity(order)) {
@@ -1007,7 +1150,7 @@ export class Workspace {
         return false;
       }
       let bytes: Uint8Array | null = null;
-      if (S.kind !== t.kind) {
+      if (!this.sameEngine(S, t)) {
         try {
           [bytes] = await this.buildSubsets(cs, S, [pages], false);
         } catch (e) {
@@ -1040,9 +1183,7 @@ export class Workspace {
       if (!ok) return false;
       if (move && !(await this.deleteAfterMove(S, pages, bundle!))) {
         // 원본에서 지우지 못했으면 대상도 되돌려 두 문서가 어긋나지 않게 한다
-        await this.stepDoc(t, 'undo');
-        t.history.popRedo();
-        t.syncHistory();
+        await this.undoMoveHalf(t);
         return false;
       }
       this.tabNotice = {
@@ -1062,7 +1203,6 @@ export class Workspace {
    */
   private async mergeParts(parts: { from: DocState; pages: number[] }[], flatten: boolean): Promise<Uint8Array> {
     const first = parts[0].from;
-    const kind = first.kind;
     const c = this.clientOf(first);
     let destId: DocId | null = null;
     try {
@@ -1072,7 +1212,7 @@ export class Workspace {
       const del = range(0, first.total).filter((i) => !keep.has(i));
       if (del.length) await c.deletePages(destId, del);
       for (const p of parts.slice(1)) {
-        if (p.from.kind === kind) {
+        if (this.sameEngine(p.from, first)) {
           await c.importPages(destId, p.from.id, p.pages);
         } else {
           const [bytes] = await this.buildSubsets(this.clientOf(p.from), p.from, [p.pages], false);
@@ -1134,12 +1274,23 @@ export class Workspace {
   async openPrintSources(parts: { key: number; pages: number[] }[]): Promise<{ sources: { client: EngineClient; id: DocId; pages: number[]; sizes: PageSize[] }[]; close: () => Promise<void> }> {
     await this.beginPrint();
     const opened: { client: EngineClient; id: DocId; pages: number[]; sizes: PageSize[] }[] = [];
+    // 임시 문서가 열려 있는 동안 그 엔진을 내리지 않는다(원본 탭을 닫아도 인쇄 렌더가 이어진다)
+    const pinned: EngineKind[] = [];
+    let released = false;
     const close = async () => {
       for (const s of opened.splice(0)) await s.client.close(s.id).catch(() => {});
+      if (released) return;
+      released = true;
+      for (const k of pinned.splice(0)) this.enginePool.unpin(k);
+      this.releaseUnusedEngines();
     };
     try {
       const list = this.printParts(parts);
       if (!list.length) throw new Error('인쇄할 쪽이 없다');
+      for (const p of list) {
+        this.enginePool.pin(p.from.kind);
+        pinned.push(p.from.kind);
+      }
       for (const p of list) {
         const c = this.clientOf(p.from);
         const base = await this.rebase(c, p.from);
@@ -1196,30 +1347,29 @@ export class Workspace {
       let created: DocState;
       try {
         const bytes = await this.mergeParts(parts, false);
-        created = await this.createNewDoc(kind, bytes, parts.flatMap((p) => p.pages.map((i) => p.from.rot[i])), bundle);
+        created = await this.createNewDoc(this.clientOf(parts[0].from), kind, bytes, parts.flatMap((p) => p.pages.map((i) => p.from.rot[i])), bundle);
       } catch (e) {
         this.pagesNotice = { kind: 'error', text: '새 파일을 만들지 못했습니다. 다시 시도해 주세요.', reassure: '열려 있는 문서는 그대로입니다.', detail: errText(e) };
         return false;
       }
+      const done: DocState[] = [];
       if (move) {
-        const done: DocState[] = [];
         for (const p of parts) {
           if (!(await this.deleteAfterMove(p.from, p.pages, bundle!))) {
             // 한 파일에서 지우지 못했으면 먼저 지운 파일도 되돌려 어긋남을 막는다
-            for (const q of done) {
-              await this.stepDoc(q, 'undo');
-              q.history.popRedo();
-              q.syncHistory();
-            }
-            created.scheduler.dispose();
-            await this.clientOf(created).close(created.id).catch(() => {});
-            created.history.dispose();
+            for (const q of done) await this.undoMoveHalf(q);
+            await this.discardDoc(created);
             return false;
           }
           done.push(p.from);
         }
       }
-      this.addDoc(created);
+      if (!this.addDoc(created)) {
+        for (const q of done) await this.undoMoveHalf(q);
+        await this.discardDoc(created);
+        this.pagesNotice = { kind: 'error', text: `열린 파일이 ${MAX_DOCS}개라 새 파일을 만들 수 없습니다. 파일을 닫고 다시 시도해 주세요.`, reassure: '열려 있는 문서는 그대로입니다.' };
+        return false;
+      }
       this.activate(created.key);
       if (move) {
         this.tabNotice = { key: created.key, kind: 'info', text: `${parts.length}개 파일에서 ${this.sumPages(parts)}쪽을 옮겼습니다. 되돌리기(Ctrl+Z)는 원본 파일들에 함께 적용됩니다.` };
@@ -1228,6 +1378,13 @@ export class Workspace {
     } finally {
       this.opBusy = false;
     }
+  }
+
+  /** 이동의 앞 절반(또는 뒤 절반)만 끝난 문서를 되돌리고 다시하기 기록을 남기지 않는다 */
+  private async undoMoveHalf(d: DocState) {
+    await this.stepDoc(d, 'undo');
+    d.history.popRedo();
+    d.syncHistory();
   }
 
   private sumPages(parts: { pages: number[] }[]) {
@@ -1273,7 +1430,7 @@ export class Workspace {
       destId = await c.open(r0.bytes.slice());
       for (const other of list.slice(1)) {
         const n = other.total;
-        if (other.kind === kind) {
+        if (this.sameEngine(other, first)) {
           await c.importPages(destId, other.id, range(0, n));
         } else {
           const bytes = (await this.rebase(this.clientOf(other), other)).bytes;
@@ -1288,10 +1445,14 @@ export class Workspace {
       const sizes = await this.readSizes(c, destId);
       const rot: RotState = list.flatMap((d) => d.rot);
       const name = uniqueName(this.docs.map((x) => x.name), `${baseName(first.name)}-병합.pdf`);
-      const d = this.makeDoc(kind, destId, name, sizes, rot, this.hooks.settings().zoom);
+      const d = this.makeDoc(c, kind, destId, name, sizes, rot, this.hooks.settings().zoom);
       destId = null;
       this.markNew(d);
-      this.addDoc(d);
+      if (!this.addDoc(d)) {
+        await this.discardDoc(d);
+        this.mergeError = `열린 파일이 ${MAX_DOCS}개라 새 파일을 만들 수 없습니다. 탭을 닫고 다시 시도해 주세요.`;
+        return false;
+      }
       this.activate(d.key);
       return true;
     } catch (e) {

@@ -69,6 +69,17 @@ export interface PagePoint {
 
 export type FormFieldKind = 'text' | 'checkbox' | 'radio' | 'combo' | 'list' | 'button' | 'signature';
 
+/**
+ * 양식 필드. 두 엔진 어댑터가 같은 계약을 따른다.
+ * - text: value 문자열. combo: 문자열|null, options = 선택지. list: 선택된 문자열 배열, options = 선택지. button/signature: value null.
+ * - checkbox: value boolean(켜짐 여부). options[0] = 켜짐 상태 이름(없을 수 있음).
+ *   set: boolean 만 받는다(그 밖은 TypeError).
+ * - radio: **위젯 하나가 필드 하나**다. 같은 그룹의 위젯들은 name 이 같고(이름만으로 위젯을 구분할 수 없다) 목록에 위젯 수만큼 나온다
+ *   (페이지·위젯 순서). value 는 boolean(이 위젯이 선택됐는가), options[0] = 이 위젯의 켜짐 값(그룹 안에서 유일).
+ *   set(name, value): 문자열은 그 켜짐 값을 가진 위젯을 선택한다(같은 그룹의 다른 위젯은 해제됨). true 는 이름이 같은 첫 위젯 선택.
+ *   false 는 아무것도 하지 않는다(라디오는 끌 수 없다). 일치하는 위젯이 없으면 오류. UI 는 `setFormFieldValue(name, field.options[0])` 로 호출한다.
+ * - 이름이 같은 비라디오 위젯은 첫 번째만 필드로 나온다.
+ */
 export interface FormField {
   name: string;
   kind: FormFieldKind;
@@ -143,34 +154,4 @@ export interface EngineAdapter {
 
   // 저장: 항상 새 바이트를 반환(원본 덮어쓰지 않음)
   save(doc: DocId, opts: SaveOptions): Promise<SaveResult>;
-}
-
-function notImplemented(): never {
-  throw 'not implemented';
-}
-
-/** 스텁. 실제 구현은 4단계에서 채운다 */
-export function createStubAdapter(name: EngineAdapter['name']): EngineAdapter {
-  return {
-    name,
-    init: async () => notImplemented(),
-    open: async () => notImplemented(),
-    close: async () => notImplemented(),
-    pageCount: async () => notImplemented(),
-    pageSize: async () => notImplemented(),
-    renderPage: async () => notImplemented(),
-    rotatePage: async () => notImplemented(),
-    deletePages: async () => notImplemented(),
-    movePage: async () => notImplemented(),
-    importPages: async () => notImplemented(),
-    listAnnotations: async () => notImplemented(),
-    addAnnotation: async () => notImplemented(),
-    updateAnnotation: async () => notImplemented(),
-    deleteAnnotation: async () => notImplemented(),
-    textQuads: async () => notImplemented(),
-    pageText: async () => notImplemented(),
-    listFormFields: async () => notImplemented(),
-    setFormFieldValue: async () => notImplemented(),
-    save: async () => notImplemented(),
-  };
 }

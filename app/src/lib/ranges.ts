@@ -7,7 +7,8 @@ const EXAMPLE = '예: 1-3,5,8-';
 
 /** '1-3,5,8-' → [[0,1,2],[4],[7..total-1]]. 쉼표 하나가 파일 하나. '-3' 은 1~3쪽, '8-' 은 8쪽~끝 */
 export function parseRanges(text: string, total: number): RangeResult {
-  const tokens = text.split(/[,;\s]+/).filter(Boolean);
+  // '-' 양옆 공백은 범위의 일부로 본다('1 - 3' → '1-3'). 그 밖의 공백·쉼표·세미콜론은 구분자
+  const tokens = text.replace(/\s*([-~–])\s*/g, '$1').split(/[,;\s]+/).filter(Boolean);
   if (!tokens.length) return { ok: false, error: `나눌 쪽 범위를 입력해 주세요. ${EXAMPLE}` };
   const groups: number[][] = [];
   for (const tok of tokens) {

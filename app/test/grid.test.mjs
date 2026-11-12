@@ -131,3 +131,12 @@ test('settings: 썸네일 크기 범위 보정', () => {
   assert.ok(defaultSettings.gridThumb >= GRID_MIN && defaultSettings.gridThumb <= GRID_MAX);
   assert.equal(defaultSettings.mode, 'view');
 });
+
+test('visibleRows: 스크롤이 끝을 넘어도 행 범위가 칸 수를 넘지 않는다', () => {
+  const x = g();
+  const [a, b] = visibleRows(x, 999999, 700);
+  assert.equal(a, x.rows - 1);
+  assert.equal(b, x.rows - 1);
+  const [c, d] = visibleRows(x, 0, 700);
+  assert.ok(c === 0 && d <= x.rows - 1 && d >= c);
+});

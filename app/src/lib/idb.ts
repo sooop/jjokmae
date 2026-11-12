@@ -66,3 +66,24 @@ export async function idbPut(key: string, value: ArrayBuffer): Promise<boolean> 
     return false;
   }
 }
+
+/** 키 삭제(실패해도 던지지 않는다). 오염된 캐시 제거용. */
+export async function idbDelete(key: string): Promise<void> {
+  try {
+    const db = await openDb();
+    if (!db) return;
+    await new Promise<void>((resolve) => {
+      try {
+        const tx = db.transaction(STORE, 'readwrite');
+        tx.objectStore(STORE).delete(key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+        tx.onabort = () => resolve();
+      } catch {
+        resolve();
+      }
+    });
+  } catch {
+    /* 무시 */
+  }
+}

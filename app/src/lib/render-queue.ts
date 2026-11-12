@@ -2,6 +2,8 @@
 // - 동시에 워커로 나가는 요청은 maxInFlight 개로 제한한다(나머지는 메인 스레드 큐에서 대기하므로 취소할 수 있다).
 // - 대기 중인 요청은 priority() 가 가장 작은 것부터 보낸다(보내는 시점에 계산한다).
 // - 취소: 대기 중이면 큐에서 빼고, 이미 나간 것은 결과가 오면 버린다.
+// - rebind: 문서 id 가 바뀌어도(저장 뒤 다시 열기) 대기 큐는 그대로 두고 새 id 로 보낸다. 옛 id 로 이미 나간 요청은
+//   결과를 버리고(또는 옛 문서가 닫혀 실패하면) 같은 요청을 새 id 로 다시 보내, 호출자의 Promise 가 비트맵으로 끝나게 한다.
 import type { DocId, EngineAdapter, RenderedBitmap } from '../engine/adapter';
 
 export interface RenderStats {
@@ -58,24 +60,37 @@ interface Entry {
   resolve: (b: RenderedBitmap | null) => void;
   canceled: boolean;
   started: boolean;
+  /** 워커로 나갈 때의 문서 세대(rebind 로 바뀌면 그 결과는 쓰지 않는다) */
+  epoch: number;
 }
 
 export class RenderScheduler {
   private queue: Entry[] = [];
   private inFlight = 0;
+  /** 시험용: 지금 나가 있는 요청 수 */
+  get pending() {
+    return this.inFlight;
+  }
   private disposed = false;
+  private epoch = 0;
 
-  constructor(
-    private adapter: EngineAdapter,
-    private doc: DocId,
-    private maxInFlight = 2,
-    private onError?: (e: unknown) => void,
-  ) {}
+  private adapter: Pick<EngineAdapter, 'renderPage'>;
+  private doc: DocId;
+  private maxInFlight: number;
+  private onError?: (e: unknown) => void;
+
+  // 주의: erasable 문법만 쓴다(Node 타입 스트리핑으로 시험에서 직접 import) — 생성자 매개변수 속성 금지
+  constructor(adapter: Pick<EngineAdapter, 'renderPage'>, doc: DocId, maxInFlight = 2, onError?: (e: unknown) => void) {
+    this.adapter = adapter;
+    this.doc = doc;
+    this.maxInFlight = maxInFlight;
+    this.onError = onError;
+  }
 
   request(index: number, scale: number, priority: () => number): RenderJob {
     let entry!: Entry;
     const promise = new Promise<RenderedBitmap | null>((resolve) => {
-      entry = { index, scale, priority, resolve, canceled: false, started: false };
+      entry = { index, scale, priority, resolve, canceled: false, started: false, epoch: 0 };
     });
     if (this.disposed) {
       entry.resolve(null);
@@ -96,6 +111,13 @@ export class RenderScheduler {
         }
       },
     };
+  }
+
+  /** 같은 문서를 다른 id 로 다시 열었을 때: 대기 큐를 보존하고 이후 요청을 새 id 로 보낸다 */
+  rebind(newId: DocId) {
+    if (this.disposed || newId === this.doc) return;
+    this.doc = newId;
+    this.epoch++;
   }
 
   /** 대기 중인 요청을 모두 취소하고 이후 요청을 거절한다 */
@@ -124,6 +146,11 @@ export class RenderScheduler {
     }
   }
 
+  private requeue(e: Entry) {
+    e.started = false;
+    this.queue.push(e);
+  }
+
   private run(e: Entry) {
     e.started = true;
     this.inFlight++;
@@ -132,14 +159,24 @@ export class RenderScheduler {
     if (stats.log.length > 600) stats.log.shift();
     stats.inFlight++;
     stats.maxInFlight = Math.max(stats.maxInFlight, stats.inFlight);
+    e.epoch = this.epoch;
     const t0 = performance.now();
-    this.adapter
-      .renderPage(this.doc, e.index, e.scale)
+    let call: Promise<RenderedBitmap>;
+    try {
+      call = Promise.resolve(this.adapter.renderPage(this.doc, e.index, e.scale));
+    } catch (err) {
+      call = Promise.reject(err);
+    }
+    call
       .then(
         (b) => {
           if (e.canceled || this.disposed) {
             stats.discarded++;
             e.resolve(null);
+          } else if (e.epoch !== this.epoch) {
+            // 옛 id 로 나간 결과: 버리고 새 id 로 다시 보낸다
+            stats.discarded++;
+            this.requeue(e);
           } else {
             stats.delivered++;
             stats.totalMs += performance.now() - t0;
@@ -147,6 +184,11 @@ export class RenderScheduler {
           }
         },
         (err) => {
+          if (!this.disposed && !e.canceled && e.epoch !== this.epoch) {
+            // 옛 문서가 닫혀 실패했다: 새 id 로 다시 보낸다
+            this.requeue(e);
+            return;
+          }
           stats.errors++;
           if (!this.disposed && !e.canceled) this.onError?.(err);
           e.resolve(null);

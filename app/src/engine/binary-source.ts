@@ -51,6 +51,8 @@ export interface BinaryStore {
   get(key: string): Promise<ArrayBuffer | null>;
   /** 저장 성공 여부 */
   put(key: string, value: ArrayBuffer): Promise<boolean>;
+  /** 오염된 항목 제거(선택). 없으면 무시된 채 네트워크 경로로 내려간다 */
+  delete?(key: string): Promise<void>;
 }
 
 /** 테스트·확장을 위한 주입 지점. 생략하면 브라우저 전역을 쓴다. */
@@ -69,8 +71,8 @@ const cacheKey = (ref: BinaryRef) => `${ref.id}@${ref.sha256}`;
 
 async function defaultStore(): Promise<BinaryStore> {
   // 동적 import: 테스트(Node)는 저장소를 주입하므로 idb 를 로드하지 않는다.
-  const { idbGet, idbPut } = await import('../lib/idb');
-  return { get: idbGet, put: idbPut };
+  const { idbGet, idbPut, idbDelete } = await import('../lib/idb');
+  return { get: idbGet, put: idbPut, delete: idbDelete };
 }
 
 function toHex(buf: ArrayBuffer): string {
@@ -118,12 +120,37 @@ export function createBinarySource(deps: BinarySourceDeps = {}): BinarySource {
   let storePromise: Promise<BinaryStore> | null = null;
   const getStore = () => (storePromise ??= deps.store ? Promise.resolve(deps.store) : defaultStore());
 
+  // 캐시 히트도 SHA-256 으로 다시 대조한다(IndexedDB 는 오염·잘림 가능). 불일치·빈 값이면 키를 지운다.
+  // subtle 이 없으면 검증할 수 없으므로 single(CDN 경로)은 캐시를 거부하고, static 은 그대로 쓴다.
   const readCache = async (ref: BinaryRef): Promise<ArrayBuffer | null> => {
+    let store: BinaryStore;
+    let cached: ArrayBuffer | null;
     try {
-      return await (await getStore()).get(cacheKey(ref));
+      store = await getStore();
+      cached = await store.get(cacheKey(ref));
     } catch {
       return null;
     }
+    if (cached === null || cached === undefined) return null;
+    let ok = false;
+    if (cached.byteLength > 0) {
+      if (subtle) {
+        try {
+          ok = toHex(await subtle.digest('SHA-256', cached)) === ref.sha256.toLowerCase();
+        } catch {
+          ok = false;
+        }
+      } else {
+        return isSingle ? null : cached;
+      }
+    }
+    if (ok) return cached;
+    try {
+      await store.delete?.(cacheKey(ref));
+    } catch {
+      /* 삭제 실패는 무시 */
+    }
+    return null;
   };
 
   return {

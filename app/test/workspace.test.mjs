@@ -109,3 +109,21 @@ test('UndoHistory: 풀 없이 쓰는 기존 동작은 그대로', () => {
   h.push(snap(10));
   assert.equal(h.canRedo, false);
 });
+
+test('pushRedo/pushUndo 도 문서 상한(단계 수·바이트)을 다시 검사한다', () => {
+  const snap = (n) => ({ bytes: new Uint8Array(n) });
+  const h = new UndoHistory(3, 1000);
+  for (let i = 0; i < 6; i++) h.pushRedo(snap(10));
+  assert.equal(h.redoStack.length, 3); // 단계 수 상한
+  for (let i = 0; i < 6; i++) h.pushUndo(snap(10));
+  assert.equal(h.undoStack.length, 3);
+  const b = new UndoHistory(20, 1000);
+  for (let i = 0; i < 10; i++) b.pushRedo(snap(300));
+  assert.ok(b.redoStack.length <= 3 && b.redoStack.length >= 1); // floor(1000/300)
+  assert.ok(b.bytes <= 1000);
+  const dropped = [];
+  const c = new UndoHistory(2, 1000);
+  c.ondrop = (s) => dropped.push(s);
+  for (let i = 0; i < 4; i++) c.pushRedo(snap(1));
+  assert.equal(dropped.length, 2); // 버려진 단계는 ondrop 으로 알린다
+});

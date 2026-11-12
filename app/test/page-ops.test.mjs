@@ -154,3 +154,67 @@ test('qpdf: 조작 결과가 --check 를 통과', async () => {
   const q = spawnSync('qpdf', ['--check', f], { encoding: 'utf8' });
   assert.equal(q.status, 0, q.stdout + q.stderr);
 });
+
+// ---- detectRotation 판정 로직(가짜 어댑터: 쪽 그림은 비대칭 패턴을 /Rotate 만큼 돌린 것) ----
+import { pickRotation, detectRotationEx } from '../src/lib/page-ops.ts';
+
+test('pickRotation: 최솟값을 고르고 차선과 격차가 작으면 certain=false', () => {
+  assert.deepEqual(pickRotation([{ r: 0, diff: 30 }, { r: 90, diff: 0.2 }, { r: 180, diff: 25 }]), { rotation: 90, certain: true });
+  assert.deepEqual(pickRotation([{ r: 0, diff: 0 }, { r: 180, diff: 0.4 }]), { rotation: 0, certain: false }); // 빈 쪽
+  assert.deepEqual(pickRotation([{ r: 270, diff: 7 }]), { rotation: 270, certain: true });
+  assert.equal(pickRotation([]), null);
+  // 앞쪽 후보가 우연히 작은 값이어도(첫 일치 방식의 오판) 전체 최솟값을 고른다
+  assert.equal(pickRotation([{ r: 0, diff: 1.9 }, { r: 180, diff: 0.1 }]).rotation, 180);
+});
+
+function fakeRotPage(trueRot, pattern) {
+  let cur = trueRot;
+  const rotateImg = (steps) => {
+    let g = pattern;
+    for (let i = 0; i < steps; i++) g = g.map((_, k) => g[(k + 1) % g.length]); // 시계 회전 대신 단순 순환(비대칭이면 충분)
+    return g;
+  };
+  return {
+    get cur() { return cur; },
+    async pageSize() { return { width: 100, height: 200 }; }, // 세로 쪽: 0/180 만 같은 크기
+    async rotatePage(_d, _i, r) { cur = r; },
+    async renderPage() {
+      const g = pattern.length ? pattern : [];
+      const shift = (cur / 90) | 0;
+      const data = new Uint8Array(rotateImg(shift).map((v) => v)).buffer;
+      return { width: g.length, height: 1, data };
+    },
+  };
+}
+// pageSize 는 회전에 따라 90/270 에서 가로세로가 바뀌어야 하므로 위 가짜를 보정
+function fakeRotPageSized(trueRot, pattern) {
+  const p = fakeRotPage(trueRot, pattern);
+  p.pageSize = async () => (p.cur % 180 === 0 ? { width: 100, height: 200 } : { width: 200, height: 100 });
+  return p;
+}
+
+test('detectRotationEx: 비대칭 그림은 실제 /Rotate 를 확실히 알아내고 문서를 그 값으로 둔다', async () => {
+  for (const t of [0, 90, 180, 270]) {
+    const p = fakeRotPageSized(t, [0, 255, 255, 0, 255, 255, 255, 0].map((v) => v));
+    const r = await detectRotationEx(p, 'x', 0);
+    // 90/270 회전은 크기가 달라 후보에서 빠진다: 같은 크기 후보(t, t+180)만 비교된다
+    assert.equal(r.rotation, t);
+    assert.equal(p.cur, t);
+  }
+});
+
+test('detectRotationEx: 빈 쪽은 certain=false 지만 문서 상태는 유지(상대 회전 +90 이 그대로 적용)', async () => {
+  const p = fakeRotPageSized(180, [255, 255, 255, 255, 255, 255, 255, 255]);
+  const r = await detectRotationEx(p, 'x', 0);
+  assert.equal(r.certain, false);
+  assert.equal(p.cur, r.rotation);
+  assert.ok([0, 180].includes(r.rotation)); // 구별 불가한 후보 중 하나: 화면 모습은 같다
+});
+
+test('parseRanges: - 양옆 공백을 허용한다', () => {
+  assert.deepEqual(parseRanges('1 - 3', 10), { ok: true, groups: [[0, 1, 2]] });
+  assert.deepEqual(parseRanges('1- 3, 5 -7 ; 9', 10), { ok: true, groups: [[0, 1, 2], [4, 5, 6], [8]] });
+  assert.deepEqual(parseRanges('8 -', 10), { ok: true, groups: [[7, 8, 9]] });
+  assert.deepEqual(parseRanges('1 2', 10), { ok: true, groups: [[0], [1]] }); // 공백만은 여전히 구분자
+  assert.equal(parseRanges('a - 3', 10).ok, false);
+});

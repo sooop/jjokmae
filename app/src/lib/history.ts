@@ -8,6 +8,9 @@ export const BUDGET_BYTES = 256 * 1024 * 1024;
 /** 열린 문서 전체의 스냅샷 바이트 합계 상한. 넘으면 가장 오래 쓰지 않은 문서의 오래된 단계부터 줄인다 */
 export const POOL_BUDGET_BYTES = 512 * 1024 * 1024;
 
+/** 되돌리기로 닫힌 새 탭의 바이트(다시하기로 되살리려고 보관) 합계 상한. 넘으면 오래된 것부터 버린다 */
+export const GHOST_BUDGET_BYTES = 128 * 1024 * 1024;
+
 export interface HasBytes {
   bytes: Uint8Array;
   /** 두 문서에 걸친 조작(쪽 이동)이면 같은 번호 */
@@ -135,10 +138,12 @@ export class UndoHistory<S extends HasBytes> {
   /** 되돌리기 직전의 '현재' 상태를 다시하기 쪽에 넣는다 */
   pushRedo(s: S): void {
     this.redoStack.push(s);
+    this.trimRedo(s.bytes.length);
     this.afterChange();
   }
   pushUndo(s: S): void {
     this.undoStack.push(s);
+    this.trim(s.bytes.length);
     this.afterChange();
   }
   popUndo(): S | undefined {
@@ -150,6 +155,13 @@ export class UndoHistory<S extends HasBytes> {
     const s = this.redoStack.pop();
     this.pool?.touch(this as unknown as PoolMember);
     return s;
+  }
+
+  /** 다시하기 쪽의 깊은 끝(가장 나중 단계)부터 index 번째(0 = 가장 깊은 것)까지 버린다. 그 단계를 다시할 수 없게 되어 뒤따르는 단계도 쓸 수 없을 때 */
+  dropRedoThrough(index: number): S[] {
+    const gone = this.redoStack.splice(0, index + 1);
+    for (const s of gone) this.ondrop?.(s);
+    return gone;
   }
 
   /** 풀이 호출: 가장 오래된 단계 하나를 버린다 */
@@ -171,6 +183,13 @@ export class UndoHistory<S extends HasBytes> {
     while (this.undoStack.length > 1 && this.bytes > this.budget) this.dropOldest('undo');
   }
 
+  /** 다시하기 쪽의 문서 상한: 단계 수와 바이트 합계(되돌리기 쪽 포함)를 넘으면 오래된 다시하기부터 버린다(방금 넣은 1단계는 남긴다) */
+  private trimRedo(docBytes: number) {
+    const max = this.stepsFor(docBytes);
+    while (this.redoStack.length > max) this.dropOldest('redo');
+    while (this.redoStack.length > 1 && this.bytes > this.budget) this.dropOldest('redo');
+  }
+
   clear() {
     this.undoStack = [];
     this.redoStack = [];
@@ -180,5 +199,47 @@ export class UndoHistory<S extends HasBytes> {
   dispose() {
     this.pool?.remove(this as unknown as PoolMember);
     this.clear();
+  }
+}
+
+/**
+ * 이동 묶음 번호 → 되돌리기로 닫힌 새 탭의 내용. 바이트 합계 상한을 넘으면 오래된 것부터 버리고 onEvict 로 알린다
+ * (그 묶음의 다시하기 단계는 되살릴 수 없으므로 호출자가 함께 정리한다). 가장 최근에 넣은 것은 상한보다 커도 남긴다.
+ */
+export class GhostStore<G extends { bytes: Uint8Array }> {
+  private map = new Map<number, G>();
+  private budget: number;
+  /** 상한 때문에 버려진 묶음 번호를 알린다(delete 로 직접 지운 것은 알리지 않는다) */
+  onEvict?: (bundle: number) => void;
+
+  constructor(budget = GHOST_BUDGET_BYTES) {
+    this.budget = budget;
+  }
+
+  get size() {
+    return this.map.size;
+  }
+  get bytes() {
+    let n = 0;
+    for (const g of this.map.values()) n += g.bytes.length;
+    return n;
+  }
+  has(bundle: number) {
+    return this.map.has(bundle);
+  }
+  get(bundle: number): G | undefined {
+    return this.map.get(bundle);
+  }
+  delete(bundle: number) {
+    this.map.delete(bundle);
+  }
+  set(bundle: number, g: G): void {
+    this.map.delete(bundle);
+    this.map.set(bundle, g);
+    while (this.map.size > 1 && this.bytes > this.budget) {
+      const oldest = this.map.keys().next().value as number;
+      this.map.delete(oldest);
+      this.onEvict?.(oldest);
+    }
   }
 }

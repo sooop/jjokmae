@@ -275,3 +275,53 @@ test('증분 요청 후 페이지 조작 케이스 실측', async () => {
   console.log('  증분 요청 결과:', JSON.stringify(rows));
   await assert.rejects(() => adapter.open(new Uint8Array([1, 2, 3, 4])));
 });
+
+// ---- 자원 해제(WASM 쪽 객체) ----
+import * as mupdfLib from 'mupdf';
+
+/** 클래스 프로토타입의 destroy 호출 수를 센다 */
+function countDestroy(Cls, fn) {
+  const orig = Cls.prototype.destroy;
+  let n = 0;
+  Cls.prototype.destroy = function (...a) { n++; return orig.apply(this, a); };
+  return Promise.resolve()
+    .then(fn)
+    .then(
+      (v) => ({ n, v }),
+      (e) => { throw e; },
+    )
+    .finally(() => { Cls.prototype.destroy = orig; });
+}
+
+test('save 마다 WASM Buffer 를 destroy 한다(증분·전체·굽기)', async () => {
+  const id = await adapter.open(read(SAMPLES[0].f));
+  await adapter.addAnnotation(id, 0, { type: 'square', rect: { x: 40, y: 40, width: 60, height: 30 }, color: '#ff0000' });
+  const { n } = await countDestroy(mupdfLib.Buffer, async () => {
+    await adapter.save(id, { incremental: false });
+    await adapter.save(id, { incremental: true });
+    await adapter.save(id, { incremental: false, flatten: true });
+  });
+  // 저장 호출마다 최소 1개(검증용 재열기 등이 더 destroy 할 수 있다). 수정 전에는 0 이었다
+  assert.ok(n >= 4, `Buffer.destroy 호출 수 ${n}`);
+  await adapter.close(id);
+});
+
+test('addAnnotation: 이미지 스탬프는 쪽 번호가 틀려 콜백 전에 던져도 Image 를 해제한다', async () => {
+  const id = await adapter.open(read(SAMPLES[0].f));
+  const img = { bytes: new Uint8Array(png(4, 4, new Uint8Array(4 * 4 * 4).fill(200))), mime: 'image/png' };
+  const stamp = { type: 'stamp', rect: { x: 10, y: 10, width: 20, height: 20 }, extra: { image: img } };
+  const bad = await countDestroy(mupdfLib.Image, () => adapter.addAnnotation(id, 999, stamp).catch((e) => e));
+  assert.ok(bad.v instanceof Error && /범위/.test(bad.v.message));
+  assert.equal(bad.n, 1, '던진 경우에도 Image.destroy 1회');
+  const good = await countDestroy(mupdfLib.Image, () => adapter.addAnnotation(id, 0, stamp));
+  assert.equal(good.n, 1, '정상 경우에도 1회');
+  await adapter.close(id);
+});
+
+test('deletePages([]) 는 deletedData 를 켜지 않는다', async () => {
+  const id = await adapter.open(read(SAMPLES[2].f));
+  await adapter.deletePages(id, []);
+  const r = await adapter.save(id, { incremental: true });
+  assert.ok(!(r.notes ?? []).some((x) => /삭제/.test(x)));
+  await adapter.close(id);
+});

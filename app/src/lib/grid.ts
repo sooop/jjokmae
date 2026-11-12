@@ -53,7 +53,8 @@ export function visibleRows(g: GridGeom, scrollTop: number, viewH: number): [num
   const rh = g.cellH + g.gap;
   const r0 = Math.max(0, Math.floor((scrollTop - g.pad) / rh));
   const r1 = Math.min(g.rows - 1, Math.floor((scrollTop + viewH - g.pad) / rh));
-  return [Math.min(r0, g.rows - 1), Math.max(r1, r0)];
+  const lo = Math.min(r0, g.rows - 1);
+  return [lo, Math.min(g.rows - 1, Math.max(r1, lo))];
 }
 
 export interface DropSpot {
