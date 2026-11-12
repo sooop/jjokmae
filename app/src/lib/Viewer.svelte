@@ -6,6 +6,7 @@
   import { animate, reduced } from './motion';
   import PageCanvas from './PageCanvas.svelte';
   import type { RenderScheduler } from './render-queue';
+  import { clampZoom } from './settings';
   import { computeLayout, indexAt } from './virtual';
 
   let {
@@ -19,6 +20,7 @@
     rev = [],
     overlay,
     ondraw,
+    onwheelzoom,
   }: {
     sizes: PageSize[];
     /** 배치·해상도를 정하는 확정 배율 */
@@ -36,6 +38,8 @@
     overlay?: Snippet<[number, boolean]>;
     /** 쪽 비트맵을 그린 직후(쪽 번호, 그 때의 rev) */
     ondraw?: (index: number, rev: number) => void;
+    /** Ctrl+휠·트랙패드 핀치로 바꾸려는 화면 배율(25~400% 로 보정된 값). 부모가 liveZoom 으로 돌려주고 멈추면 확정한다 */
+    onwheelzoom?: (zoom: number) => void;
   } = $props();
 
   // 시작 위치는 만들어질 때의 값으로 고정한다. current 와 같은 상태에 묶여 있어도, 마운트 직후 첫 레이아웃 계산이 current 를 0 으로
@@ -56,7 +60,28 @@
   /** 지금 화면에 보이는 실제 배율(확정 배율 × 변환) */
   let shownZoom = untrack(() => zoom);
   let zoomAnim: Animation | null = null;
-  const centerOrigin = () => `${scroller.scrollLeft + scroller.clientWidth / 2}px ${scroller.scrollTop + scroller.clientHeight / 2}px`;
+  /** 휠 확대 중 포인터 아래에 고정할 지점(스크롤 영역 안 오프셋). 한 번의 연속 입력 동안 처음 값을 쓴다 */
+  let anchorPt: { x: number; y: number } | null = null;
+  const centerOrigin = () =>
+    anchorPt
+      ? `${scroller.scrollLeft + anchorPt.x}px ${scroller.scrollTop + anchorPt.y}px`
+      : `${scroller.scrollLeft + scroller.clientWidth / 2}px ${scroller.scrollTop + scroller.clientHeight / 2}px`;
+
+  function onWheel(e: WheelEvent) {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault(); // 브라우저 기본 페이지 확대를 막는다
+    if (!onwheelzoom || !sizes.length) return;
+    const dy = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
+    if (!dy) return;
+    const cur = liveZoom ?? zoom;
+    const next = clampZoom(cur * Math.exp(-dy * 0.0022));
+    if (Math.abs(next - cur) < 1e-6) return;
+    if (!anchorPt) {
+      const r = scroller.getBoundingClientRect();
+      anchorPt = { x: e.clientX - r.left, y: e.clientY - r.top };
+    }
+    onwheelzoom(next);
+  }
 
   // 끄는 동안: CSS 변환으로 즉시 반응한다(화면 가운데 지점을 기준으로)
   $effect(() => {
@@ -121,7 +146,7 @@
   let lastTop = 0;
   let lockUntil = 0;
   let raf = 0;
-  let pendingAnchor: { page: number; frac: number; xRatio: number } | null = null;
+  let pendingAnchor: { page: number; frac: number; xRatio: number; ax: number; ay: number } | null = null;
   let snap = { zoom: 0, tops: [] as number[], heights: [] as number[] };
 
   function update() {
@@ -194,12 +219,16 @@
   $effect.pre(() => {
     const z = zoom;
     if (scroller && z !== snap.zoom && snap.tops.length) {
-      const y = scroller.scrollTop + scroller.clientHeight / 2;
+      const ax = anchorPt?.x ?? scroller.clientWidth / 2;
+      const ay = anchorPt?.y ?? scroller.clientHeight / 2;
+      const y = scroller.scrollTop + ay;
       const page = indexAt(snap.tops, y);
       pendingAnchor = {
         page,
         frac: (y - snap.tops[page]) / (snap.heights[page] || 1),
-        xRatio: (scroller.scrollLeft + scroller.clientWidth / 2) / (scroller.scrollWidth || 1),
+        xRatio: (scroller.scrollLeft + ax) / (scroller.scrollWidth || 1),
+        ax,
+        ay,
       };
     }
   });
@@ -213,9 +242,10 @@
       pendingAnchor = null;
       lockUntil = performance.now() + 150;
       const y = lay.tops[a.page] + a.frac * hs[a.page];
-      scroller.scrollTop = Math.max(0, y - scroller.clientHeight / 2);
-      scroller.scrollLeft = Math.max(0, a.xRatio * scroller.scrollWidth - scroller.clientWidth / 2);
+      scroller.scrollTop = Math.max(0, y - a.ay);
+      scroller.scrollLeft = Math.max(0, a.xRatio * scroller.scrollWidth - a.ax);
       glideZoom(z);
+      anchorPt = null;
     }
     snap = { zoom: z, tops: lay.tops, heights: hs };
     untrack(update);
@@ -224,6 +254,7 @@
   onMount(() => {
     const ro = new ResizeObserver(() => onScroll());
     ro.observe(scroller);
+    scroller.addEventListener('wheel', onWheel, { passive: false });
     // 조작 뒤 다시 만들어질 때 보던 쪽으로 곧바로 간다
     if (startScroll) {
       lockUntil = performance.now() + 300;
@@ -238,6 +269,7 @@
     update();
     return () => {
       ro.disconnect();
+      scroller.removeEventListener('wheel', onWheel);
       if (raf) cancelAnimationFrame(raf);
     };
   });
@@ -284,8 +316,8 @@
   .content {
     position: relative;
     width: 100%;
+    will-change: auto;
   }
-  .content { will-change: auto; }
   .slot {
     position: absolute;
     left: 50%;

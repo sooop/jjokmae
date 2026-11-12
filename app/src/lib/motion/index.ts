@@ -146,25 +146,6 @@ export const rangeFill: Action<HTMLInputElement, unknown> = (node) => {
   };
 };
 
-/** 눌린 위치에서 번지는 파문(큰 버튼·목록 항목용). 모션 줄이기에서는 하지 않는다 */
-export const ripple: Action<HTMLElement, void> = (node) => {
-  const down = (e: PointerEvent) => {
-    if (reduced() || e.button !== 0) return;
-    const r = node.getBoundingClientRect();
-    const d = Math.max(r.width, r.height) * 1.6;
-    const s = document.createElement('span');
-    s.setAttribute('aria-hidden', 'true');
-    s.style.cssText = `position:absolute;left:${e.clientX - r.left - d / 2}px;top:${e.clientY - r.top - d / 2}px;width:${d}px;height:${d}px;border-radius:50%;background:currentColor;opacity:.14;pointer-events:none;transform:scale(0);`;
-    if (getComputedStyle(node).position === 'static') node.style.position = 'relative';
-    node.style.overflow = 'hidden';
-    node.appendChild(s);
-    const a = s.animate([{ transform: 'scale(0)', opacity: 0.18 }, { transform: 'scale(1)', opacity: 0 }], { duration: 520, easing: EASE.out });
-    a.onfinish = () => s.remove();
-  };
-  node.addEventListener('pointerdown', down);
-  return { destroy: () => node.removeEventListener('pointerdown', down) };
-};
-
 /** 요소를 한 번 튕긴다(대상이 받는 반응). 같은 요소에 겹쳐 불려도 이전 것을 이어받는다 */
 const pulsing = new WeakMap<Element, Animation>();
 export function pulse(el: Element | null | undefined, strength = 1) {

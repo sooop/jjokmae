@@ -3,19 +3,26 @@
   import { ENGINE_LABEL, formatSize } from './engine-boot';
   import type { ViewerStatus } from './status';
   import { noticeIn, noticeOut } from './motion';
+  import Icon from './ui/Icon.svelte';
   import IconButton from './ui/IconButton.svelte';
   import Progress from './ui/Progress.svelte';
+  import { restoreFocus } from './ui/restore-focus';
 
   let { status, ondismiss }: { status: ViewerStatus; ondismiss: () => void } = $props();
+  // 내려받기 확인 단계에서는 키보드로 바로 고를 수 있게 첫 단추로 포커스를 옮긴다
+  let confirmBtn: HTMLButtonElement | undefined = $state();
+  $effect(() => {
+    confirmBtn?.focus({ preventScroll: true });
+  });
 </script>
 
-<div class="card" class:error={status.phase === 'error'} role={status.phase === 'error' ? 'alert' : 'status'} data-phase={status.phase} in:noticeIn|global={{ y: -14 }} out:noticeOut|global>
+<div class="card" class:error={status.phase === 'error'} role={status.phase === 'error' ? 'alert' : 'status'} data-phase={status.phase} use:restoreFocus in:noticeIn|global={{ y: -14 }} out:noticeOut|global>
   {#if status.phase === 'confirm'}
     <p class="msg">
       {formatSize(status.ref.size)}를 내려받아야 PDF를 열 수 있습니다. {status.ref.reason}
     </p>
     <div class="row">
-      <button type="button" class="primary" onclick={() => status.phase === 'confirm' && status.decide(true)}>내려받기</button>
+      <button type="button" class="primary" bind:this={confirmBtn} onclick={() => status.phase === 'confirm' && status.decide(true)}>내려받기</button>
       <button type="button" onclick={() => status.phase === 'confirm' && status.decide(false)}>취소</button>
     </div>
   {:else if status.phase === 'download'}
@@ -28,7 +35,7 @@
     <p class="msg" title={status.name}>파일을 여는 중입니다.</p>
     <Progress value={null} label="파일 여는 중" />
   {:else}
-    <p class="msg" title={status.detail}>{status.message}</p>
+    <p class="msg" title={status.detail}><span class="mark" aria-hidden="true"><Icon name="alert" size={16} /></span>{status.message}</p>
     <div class="row">
       {#if status.retry}<button type="button" onclick={() => status.phase === 'error' && status.retry?.()}>다시 시도</button>{/if}
       <IconButton icon="close" label="닫기" onclick={ondismiss} />
@@ -55,7 +62,7 @@
     transform-origin: top center;
   }
   .card.error { border-color: color-mix(in srgb, var(--danger) 55%, var(--border)); }
-  .card.error .msg::before { content: '⚠ '; color: var(--danger); }
+  .mark { display: inline-flex; vertical-align: -3px; margin-right: 6px; color: var(--danger); }
   .msg { margin: 0; line-height: 1.5; word-break: keep-all; }
   .row { display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
 

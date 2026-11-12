@@ -15,3 +15,5 @@ e2e-results/
 test-results/
 playwright-report/
 app/e2e/.generated/
+harness/out2/fixtures/key.pem
+harness/out2/fixtures/test.p12

@@ -67,10 +67,11 @@ test.describe('모션: 쪽 이동 연출', () => {
     const f0 = await app.center(app.cellFace(0));
     const t3 = await app.center(app.cellFace(3));
     await app.dragMouse(f0, { x: t3.x + 40, y: t3.y }, { steps: 10 });
-    await expect.poll(() => page.locator('[data-flyer]').count(), { timeout: 3000, intervals: [16, 30, 50] }).toBeGreaterThan(0);
+    // 존재 확인과 측정을 한 번의 evaluate 안에서 한다(따로 하면 그 사이 비행체가 사라져 첫 요소를 못 찾는다)
     // 비행체는 격자 안에서 transform 애니메이션 중이다
-    const anims = await page.locator('[data-flyer]').first().evaluate((e) => e.getAnimations().map((a) => a.playState));
-    expect(anims.length).toBeGreaterThan(0);
+    await expect
+      .poll(() => page.evaluate(() => document.querySelector('[data-flyer]')?.getAnimations().length ?? 0), { timeout: 3000, intervals: [16, 30, 50] })
+      .toBeGreaterThan(0);
     await expect(page.locator('[data-flyer]')).toHaveCount(0, { timeout: 8000 });
     await expect.poll(async () => (await app.summary()).docs[0].undo).toBe(1);
     await app.cellDrawn(0);

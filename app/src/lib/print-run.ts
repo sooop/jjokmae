@@ -113,8 +113,11 @@ function armCleanup(fn: () => void, extra?: Window | null) {
 }
 
 // ---------- 방식 A: iframe ----------
-/** 인쇄용 PDF 바이트를 숨은 iframe 에서 인쇄한다. 막히면 FrameError(호출자가 방식 B 로 전환한다) */
-export async function printViaIframe(bytes: Uint8Array): Promise<void> {
+/**
+ * 인쇄용 PDF 바이트를 숨은 iframe 에서 인쇄한다. 막히면 FrameError(호출자가 방식 B 로 전환한다).
+ * cancel.value 가 서 있으면 불러온 뒤와 print() 직전에 iframe·URL 을 거두고 PrintCancelled 로 끝낸다.
+ */
+export async function printViaIframe(bytes: Uint8Array, cancel?: { value: boolean }): Promise<void> {
   cleanupPrint();
   const inj = inject();
   const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'application/pdf' }));
@@ -142,13 +145,21 @@ export async function printViaIframe(bytes: Uint8Array): Promise<void> {
     const timeout = new Promise<never>((_, rej) => {
       timer = window.setTimeout(() => rej(new FrameError('timeout', 'iframe 불러오기 시간 초과')), inj.timeoutMs ?? LOAD_TIMEOUT_MS);
     });
+    // 불러오는 동안(최대 LOAD_TIMEOUT_MS)에도 취소를 알아챈다
+    let watch = 0;
+    const canceled = new Promise<never>((_, rej) => {
+      if (cancel) watch = window.setInterval(() => cancel.value && rej(new PrintCancelled()), 100);
+    });
     try {
-      await Promise.race([loaded, timeout]);
+      await Promise.race([loaded, timeout, canceled]);
     } finally {
       clearTimeout(timer);
+      clearInterval(watch);
     }
     log('iframe-loaded');
+    if (cancel?.value) throw new PrintCancelled();
     await sleep(400); // PDF 뷰어가 문서를 올릴 시간
+    if (cancel?.value) throw new PrintCancelled();
     let win: Window | null;
     try {
       if (inj.iframe === 'throw') throw new DOMException('주입한 접근 차단', 'SecurityError');

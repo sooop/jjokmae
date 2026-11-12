@@ -212,7 +212,7 @@ export function run(plan: Plan, o: RunOpts = {}, ctx?: { docKey: number; stateId
         { transform: tf(j.a, w0, h0, 0, 1) },
         { transform: tf(j.b, w0, h0, rot, s1) },
       ];
-      // 회전은 가운데에서 한 번 더 튕긴다(넘침이 스프링에서 나온다)
+      // 이동·회전·크기는 두 키프레임 사이를 한 번에 보간한다(튕김은 스프링 이징 곡선에서 나온다)
     } else if (j.a && !j.b) {
       // 사라진다: 줄어들며 살짝 떠올라 흐려진다
       const out = { x: j.a.x, y: j.a.y - 10, w: j.a.w, h: j.a.h };
@@ -280,6 +280,7 @@ export function flyToTarget(indices: number[], target: Element | null, from?: Sc
   const tx = tr.left + Math.min(tr.width / 2, 120);
   const ty = tr.top + tr.height / 2;
   const layer = document.createElement('div');
+  layer.setAttribute('data-flyer-layer', '');
   layer.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;z-index:75;pointer-events:none;';
   document.body.appendChild(layer);
   const picks = indices.filter((i) => {

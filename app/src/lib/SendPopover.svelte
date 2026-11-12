@@ -3,6 +3,7 @@
   // 쪽 보내기 팝오버: 복사/이동 → 대상(새 파일·열린 파일) → 위치(맨 앞·맨 뒤·특정 쪽 뒤).
   import { onMount, untrack } from 'svelte';
   import type { SendPos, SendTargetRow } from './transfer';
+  import { restoreFocus } from './ui/restore-focus';
 
   let {
     count,
@@ -59,16 +60,16 @@
   }
 </script>
 
-<div class="pop stagger" role="dialog" aria-label="쪽 보내기" data-testid="send-pop" in:popIn|global={{ origin: 'top left' }}
+<div class="pop stagger" role="dialog" aria-label="쪽 보내기" data-testid="send-pop" use:restoreFocus={{ fallback: ['[data-testid=grid]', '[data-testid=thumbs]'] }} in:popIn|global={{ origin: 'top left' }}
   out:popOut|global={{ origin: 'top left' }} onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), onclose())} tabindex="-1">
   <p class="head">{count}쪽 보내기</p>
 
   <div class="seg" role="radiogroup" aria-label="보내는 방식">
-    <label class:on={mode === 'copy'} title="원본은 그대로 두고 대상에 붙입니다">
+    <label title="원본은 그대로 두고 대상에 붙입니다">
       <input bind:this={first} type="radio" name="send-mode" value="copy" bind:group={mode} data-testid="send-mode-copy" />
       <span>복사</span>
     </label>
-    <label class:on={mode === 'move'} title="대상에 넣은 뒤 원본에서 지웁니다. 되돌리기는 두 파일에 함께 적용됩니다">
+    <label title="대상에 넣은 뒤 원본에서 지웁니다. 되돌리기는 두 파일에 함께 적용됩니다">
       <input type="radio" name="send-mode" value="move" bind:group={mode} data-testid="send-mode-move" />
       <span>이동</span>
     </label>

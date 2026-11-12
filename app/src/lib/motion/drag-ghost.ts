@@ -92,12 +92,12 @@ export class DragGhost {
     const stack = (this.stack = document.createElement('div'));
     stack.style.cssText = `position:absolute;left:${-this.gx}px;top:${-this.gy}px;width:${this.w}px;height:${this.h}px;transform-origin:${this.gx}px ${this.gy}px;will-change:transform;`;
     const sh = (this.shadow = document.createElement('div'));
-    sh.style.cssText = 'position:absolute;inset:0;border-radius:4px;box-shadow:0 18px 38px -6px rgb(0 0 0 / .42),0 6px 14px rgb(0 0 0 / .22);opacity:0;';
+    sh.style.cssText = 'position:absolute;inset:0;border-radius:4px;box-shadow:var(--shadow-ghost);opacity:0;';
     stack.appendChild(sh);
     // 뒤 카드부터 쌓는다(DOM 뒤쪽이 위): 맨 위가 집은 쪽
     for (let i = this.n - 1; i >= 0; i--) {
       const c = document.createElement('div');
-      c.style.cssText = `position:absolute;inset:0;border-radius:4px;overflow:hidden;background:#fff;border:1px solid rgb(0 0 0 / .18);transform-origin:50% 50%;`;
+      c.style.cssText = `position:absolute;inset:0;border-radius:4px;overflow:hidden;background:var(--page-bg);border:1px solid color-mix(in srgb, var(--fg) 18%, transparent);transform-origin:50% 50%;`;
       const src = o.cards[i]?.canvas;
       const cv = document.createElement('canvas');
       cv.style.cssText = 'display:block;width:100%;height:100%;';
@@ -120,7 +120,7 @@ export class DragGhost {
       const b = (this.badge = document.createElement('span'));
       b.textContent = String(o.count);
       b.style.cssText =
-        'display:grid;place-items:center;min-width:26px;height:26px;padding:0 7px;border-radius:13px;font:600 13px/1 var(--font-sans);font-variant-numeric:tabular-nums;background:var(--accent);color:var(--accent-fg);box-shadow:0 0 0 2px var(--bg),0 4px 10px rgb(0 0 0 / .3);transform:scale(0);';
+        'display:grid;place-items:center;min-width:26px;height:26px;padding:0 7px;border-radius:13px;font:600 13px/1 var(--font-sans);font-variant-numeric:tabular-nums;background:var(--accent);color:var(--accent-fg);box-shadow:0 0 0 2px var(--bg),var(--shadow-2);transform:scale(0);';
       box.appendChild(b);
       el.appendChild(box);
     }

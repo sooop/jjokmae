@@ -4,6 +4,7 @@
   import { onMount } from 'svelte';
   import type { MergeDoc } from './transfer';
   import IconButton from './ui/IconButton.svelte';
+  import { restoreFocus } from './ui/restore-focus';
   import Notice from './ui/Notice.svelte';
 
   let {
@@ -48,7 +49,7 @@
   }
 </script>
 
-<div class="pop stagger" bind:this={root} in:popIn|global={{ origin: 'top left' }}
+<div class="pop stagger" bind:this={root} use:restoreFocus={{ fallback: ['[aria-label^="열린 파일 병합"]', '[data-testid=grid]'] }} in:popIn|global={{ origin: 'top left' }}
   out:popOut|global={{ origin: 'top left' }} role="dialog" aria-label="열린 파일 병합" data-testid="merge-pop" onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), onclose())} tabindex="-1">
   <p class="head">열린 파일 병합</p>
   <ul>

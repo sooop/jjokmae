@@ -4,6 +4,7 @@
   import { drawerIn, drawerOut, rangeFill } from './motion';
   import { GRID_MAX, GRID_MIN, SIDE_MAX, SIDE_MIN, type Settings } from './settings';
   import IconButton from './ui/IconButton.svelte';
+  import { restoreFocus } from './ui/restore-focus';
   import { ZOOM_PRESETS } from './zoom';
 
   let {
@@ -20,6 +21,41 @@
 
   let panel: HTMLElement;
   onMount(() => panel.focus());
+
+  const FOCUSABLE = 'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])';
+  /** Esc 는 포커스가 어디 있든 서랍을 닫고, Tab 은 서랍 안에서만 돈다(모달) */
+  function onWinKey(e: KeyboardEvent) {
+    if (e.key === 'Escape') {
+      e.stopPropagation();
+      e.preventDefault();
+      onclose();
+      return;
+    }
+    if (e.key !== 'Tab' || e.ctrlKey || e.altKey || e.metaKey) return;
+    const items = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => el.getClientRects().length > 0);
+    if (!items.length) {
+      e.preventDefault();
+      panel.focus();
+      return;
+    }
+    const first = items[0];
+    const last = items[items.length - 1];
+    const a = document.activeElement;
+    if (!a || !panel.contains(a)) {
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+    } else if (e.shiftKey && (a === first || a === panel)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && a === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+  onMount(() => {
+    window.addEventListener('keydown', onWinKey, true);
+    return () => window.removeEventListener('keydown', onWinKey, true);
+  });
 
   const zoomOptions = $derived(
     ZOOM_PRESETS.includes(settings.zoom) ? ZOOM_PRESETS : [...ZOOM_PRESETS, settings.zoom].sort((a, b) => a - b),
@@ -60,7 +96,7 @@
   ];
 </script>
 
-<div class="drawer" bind:this={panel} tabindex="-1" role="dialog" aria-label="설정" onkeydown={(e) => e.key === 'Escape' && onclose()} in:drawerIn|global out:drawerOut|global>
+<div class="drawer" bind:this={panel} tabindex="-1" role="dialog" aria-modal="true" aria-label="설정" use:restoreFocus={{ fallback: 'button[aria-label="설정"]' }} in:drawerIn|global out:drawerOut|global>
   <header>
     <h2>설정</h2>
     <IconButton icon="close" label="설정 닫기" onclick={onclose} />

@@ -4,6 +4,7 @@
   import { onMount } from 'svelte';
   import { chunkEvery, parseRanges } from './ranges';
   import Notice from './ui/Notice.svelte';
+  import { restoreFocus } from './ui/restore-focus';
 
   let {
     total,
@@ -42,7 +43,7 @@
   }
 </script>
 
-<div class="pop stagger" in:popIn|global={{ origin: 'top right' }}
+<div class="pop stagger" use:restoreFocus={{ fallback: ['button[aria-label="나누기"]', '[data-testid=grid]'] }} in:popIn|global={{ origin: 'top right' }}
   out:popOut|global={{ origin: 'top right' }} role="dialog" aria-label="나누기" data-testid="split-pop" onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), onclose())} tabindex="-1">
   <label class="row">
     <input type="radio" name="split-mode" value="ranges" bind:group={mode} />

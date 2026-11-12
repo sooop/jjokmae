@@ -194,7 +194,7 @@ test.describe('정리 모드: 파일 목록으로 끌기', () => {
     // 새 파일 칸을 클릭해도 아무것도 만들어지지 않는다
     await page.getByTestId('new-slot').click();
     expect((await app.summary()).docs).toHaveLength(4);
-    await expect(page.getByTestId('new-slot')).toHaveAttribute('title', /클릭해도 아무것도/);
+    await expect(page.getByTestId('new-slot')).toHaveAttribute('title', /끌어다 놓으면/);
 
     // Esc 로 취소
     await app.selectFile('docA.pdf');

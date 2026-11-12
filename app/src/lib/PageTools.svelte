@@ -39,9 +39,13 @@
 </script>
 
 <div class="tools" class:inline role="toolbar" aria-label="선택한 쪽 조작">
-  <button type="button" class="count" onclick={onclear} disabled={count === 0} title="선택 해제 (Esc)" aria-label="{count}쪽 선택됨, 선택 해제">
-    {count}쪽 선택
-  </button>
+  {#if count > 0}
+    <button type="button" class="count" onclick={onclear} title="선택 해제 (Esc)" aria-label="{count}쪽 선택됨, 선택 해제">
+      {count}쪽 선택
+    </button>
+  {:else}
+    <span class="count">0쪽 선택</span>
+  {/if}
   <div class="btns">
     <IconButton icon="rotate-cw" label="선택한 쪽 시계 방향 90° 회전" onclick={onrotate} disabled={off} />
     <IconButton icon="copy" label="선택한 쪽 뒤에 복제" onclick={oncopy} disabled={off} />
@@ -59,7 +63,9 @@
   .tools { padding: 6px 4px 4px 8px; border-bottom: 1px solid var(--border); display: grid; gap: 2px; }
   .count {
     justify-self: start;
-    min-height: 24px;
+    display: inline-flex;
+    align-items: center;
+    min-height: 28px;
     padding: 0 6px;
     border-color: transparent;
     background: transparent;

@@ -3,6 +3,7 @@
   // 저장하지 않은 변경이 있는 파일을 닫을 때의 확인 안내. 상단 탭 막대와 정리 모드 파일 목록이 같은 카드를 쓴다.
   // 위치는 부모가 정한다(이 카드는 위치를 정하지 않는다).
   import { onMount } from 'svelte';
+  import { restoreFocus } from './ui/restore-focus';
 
   let {
     name,
@@ -29,6 +30,7 @@
   out:popOut|global={{ origin: 'top left' }}
   aria-label="저장하지 않은 변경"
   tabindex="-1"
+  use:restoreFocus={{ fallback: ['[role=tab][aria-selected=true]', '[data-testid=file][aria-selected=true]', '[data-testid=grid]'] }}
   onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), onconfirm('cancel'))}
   data-testid="close-confirm"
 >

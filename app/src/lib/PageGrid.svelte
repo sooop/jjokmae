@@ -16,7 +16,8 @@
   import { onMount, untrack, type Snippet } from 'svelte';
   import type { PageSize } from '../engine/adapter';
   import { bandHits, cellRect, dropAt, GRID_ASPECT, GRID_LABEL, gridGeom, moveFocus, renderBucket, visibleRows, type DropSpot } from './grid';
-  import { DragGhost, type ScreenRect } from './motion/drag-ghost';
+  import { DragSession, buttonsLost, gestureActive, holdGesture, releaseGesture, watchPointerLoss } from './drag-session';
+  import type { ScreenRect } from './motion/drag-ghost';
   import { notifyUpdated, registerHost, type PageHost } from './motion/page-flip';
   import type { RenderScheduler } from './render-queue';
   import { clickSelect, span } from './selection';
@@ -29,6 +30,7 @@
     scheduler,
     rev = [],
     gen,
+    stateId = 0,
     selected,
     anchor,
     thumb,
@@ -49,6 +51,8 @@
     rev?: number[];
     /** 문서 화면이 다시 만들어질 때 올라가는 값: 칸(캔버스)만 새로 만들고 스크롤은 그대로 둔다 */
     gen: number;
+    /** 문서 구조가 바뀔 때마다 오르는 값: 끄는 동안 바뀌면 끌기를 버린다 */
+    stateId?: number;
     selected: number[];
     anchor: number | null;
     /** 썸네일 칸 폭(px). 연속으로 바뀌는 동안은 CSS 로만 보이고, 멈춘 뒤 해상도를 다시 그린다 */
@@ -167,15 +171,11 @@
   }
 
   // ---------- 선택 ----------
-  let justDragged = false;
-  function suppressClick() {
-    justDragged = true;
-    setTimeout(() => (justDragged = false), 0);
-  }
+  const suppressClick = () => session.suppressClick();
   const sameList = (a: number[], b: number[]) => a.length === b.length && a.every((v, k) => v === b[k]);
 
   function pick(i: number, e: MouseEvent) {
-    if (justDragged) return;
+    if (session.justDragged) return;
     const r = clickSelect(selected, anchor, i, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey });
     onchange(r.selected, r.anchor);
     focusIdx = i;
@@ -186,6 +186,8 @@
   let band = $state<{ x: number; y: number; w: number; h: number } | null>(null);
   let bandSt: { id: number; x0: number; y0: number; add: boolean; base: number[]; active: boolean; baseAnchor: number | null } | null = null;
   let lastPt = { x: 0, y: 0 };
+  let unwatchBand: (() => void) | null = null;
+  const bandHold = {};
   let edgeV = 0;
   let edgeRaf = 0;
 
@@ -208,8 +210,10 @@
     lastPt = { x: e.clientX, y: e.clientY };
     window.addEventListener('pointermove', onBandMove);
     window.addEventListener('pointerup', onBandUp);
-    window.addEventListener('pointercancel', endBand);
+    window.addEventListener('pointercancel', lostBand);
     window.addEventListener('keydown', onBandKey, true);
+    unwatchBand = watchPointerLoss(lostBand);
+    holdGesture(bandHold);
   }
 
   function updateBand() {
@@ -243,6 +247,10 @@
 
   function onBandMove(e: PointerEvent) {
     if (!bandSt || e.pointerId !== bandSt.id) return;
+    if (buttonsLost(e)) {
+      lostBand();
+      return;
+    }
     lastPt = { x: e.clientX, y: e.clientY };
     if (!bandSt.active) {
       const p = contentPt(e.clientX, e.clientY);
@@ -265,16 +273,24 @@
   function onBandKey(e: KeyboardEvent) {
     if (e.key !== 'Escape' || !bandSt) return;
     e.stopPropagation();
+    lostBand();
+  }
+
+  /** Esc·포인터 유실: 영역 선택을 취소하고 시작 전 선택으로 돌린다 */
+  function lostBand() {
     const st = bandSt;
     endBand();
-    if (st.active) onchange(st.base, st.baseAnchor);
+    if (st?.active) onchange(st.base, st.baseAnchor);
   }
 
   function endBand() {
     window.removeEventListener('pointermove', onBandMove);
     window.removeEventListener('pointerup', onBandUp);
-    window.removeEventListener('pointercancel', endBand);
+    window.removeEventListener('pointercancel', lostBand);
     window.removeEventListener('keydown', onBandKey, true);
+    unwatchBand?.();
+    unwatchBand = null;
+    releaseGesture(bandHold);
     if (edgeRaf) cancelAnimationFrame(edgeRaf);
     edgeRaf = 0;
     edgeV = 0;
@@ -283,69 +299,52 @@
   }
 
   // ---------- 드래그: 격자 안 재정렬 / 파일 목록으로 보내기 ----------
+  // 누름·문턱·고스트·가장자리 스크롤·취소는 DragSession 이 맡고, 여기서는 삽입 자리와 대상 계산만 한다.
   let drag = $state<{ moving: number[]; spot: DropSpot; x: number; y: number; target: DropTarget | null; targetName: string } | null>(null);
-  let ghost: DragGhost | null = null;
   /** 취소하고 되돌아가는 동안 원래 자리를 계속 자리표시로 둘 쪽들 */
   let returning = $state<number[]>([]);
   const isMoving = (i: number) => (!!drag && drag.moving.includes(i)) || returning.includes(i);
-  let press: { x: number; y: number; index: number; handle: boolean; id: number; mouse: boolean } | null = null;
 
-  let press0: { index: number } | null = null;
-  function onPress(e: PointerEvent, index: number, handle: boolean) {
-    if (press) return;
-    if (e.pointerType === 'mouse' ? e.button !== 0 : !handle) return;
-    press0 = { index };
-    press = { x: e.clientX, y: e.clientY, index, handle, id: e.pointerId, mouse: e.pointerType === 'mouse' };
-    lastPt = { x: e.clientX, y: e.clientY };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-    window.addEventListener('pointercancel', cancelDrag);
-    window.addEventListener('keydown', onDragKey, true);
-  }
-
-  function onMove(e: PointerEvent) {
-    if (!press || e.pointerId !== press.id) return;
-    lastPt = { x: e.clientX, y: e.clientY };
-    if (!drag) {
-      if (!press.handle && Math.hypot(e.clientX - press.x, e.clientY - press.y) < DRAG_THRESHOLD) return;
-      cancelLong();
+  const session = new DragSession<{ before: number; target: DropTarget | null }>({
+    scroller: () => scroller,
+    token: () => `${gen}:${stateId}`,
+    edgeStep: 14,
+    onDragStart: () => cancelLong(),
+    begin: (press, pt) => {
       const idx = press.index;
       const moving = selSet.has(idx) && selected.length > 1 ? [...selected].sort((a, b) => a - b) : [idx];
-      const p = contentPt(e.clientX, e.clientY);
-      drag = { moving, spot: dropAt(geom, p.x, p.y), x: e.clientX, y: e.clientY, target: null, targetName: '' };
-      startGhost(moving, idx, e.clientX, e.clientY);
+      const p = contentPt(pt.x, pt.y);
+      drag = { moving, spot: dropAt(geom, p.x, p.y), x: pt.x, y: pt.y, target: null, targetName: '' };
       ondragtab({ over: null });
-      dragEdgeLoop();
-    }
-    e.preventDefault();
-    updateDrag();
-  }
+      return moving;
+    },
+    label: () => ghostLabel(),
+    update: () => updateDrag(),
+    snapshot: () => ({ before: drag!.spot.before, target: drag!.target }),
+    drop: (moving, grabbed, rects, { before, target }) => {
+      if (target != null) ontabdrop(moving, target, rects);
+      else {
+        // 놓은 쪽들은 고스트가 있던 자리(부채꼴 카드)에서 새 자리로 흩어져 내려앉는다
+        const starts = new Map<number, ScreenRect>();
+        const ord = [grabbed, ...moving.filter((m) => m !== grabbed)];
+        ord.forEach((m, k) => {
+          const r = rects[Math.min(k, rects.length - 1)];
+          if (r) starts.set(m, r);
+        });
+        onreorder(moving, before, starts);
+      }
+    },
+    ended: () => ondragtab(null),
+    clear: () => (drag = null),
+    returning: (m) => (returning = m),
+  });
+  const onPress = (e: PointerEvent, index: number, handle: boolean) => session.start(e, index, handle);
+  // 끄는 사이 문서 화면이 바뀌면(되돌리기·다시하기 등) 집었던 번호가 낡았으므로 끌기를 버린다
+  $effect(() => {
+    void `${gen}:${stateId}`;
+    untrack(() => session.tokenChanged());
+  });
 
-  function frameRectOf(i: number): ScreenRect | null {
-    const f = scroller.querySelector<HTMLElement>(`[data-thumb="${i}"] .frame`);
-    if (!f) return null;
-    const r = f.getBoundingClientRect();
-    return { x: r.left, y: r.top, w: r.width, h: r.height };
-  }
-  const canvasOf = (i: number) => scroller.querySelector<HTMLCanvasElement>(`[data-thumb="${i}"] canvas`);
-
-  function startGhost(moving: number[], grabbed: number, x: number, y: number) {
-    ghost?.destroy();
-    const origin = frameRectOf(grabbed);
-    if (!origin) {
-      ghost = null;
-      return;
-    }
-    // 집은 쪽이 맨 위, 나머지는 번호순으로 최대 4장
-    const order = [grabbed, ...moving.filter((m) => m !== grabbed)];
-    ghost = new DragGhost({
-      cards: order.slice(0, 4).map((i) => ({ canvas: canvasOf(i) })),
-      count: moving.length,
-      pointer: { x, y },
-      origin,
-      label: ghostLabel(),
-    });
-  }
   function ghostLabel(): string {
     const d = drag;
     if (!d) return '';
@@ -361,95 +360,27 @@
   function updateDrag() {
     if (!drag) return;
     const r = scroller.getBoundingClientRect();
-    const p = contentPt(lastPt.x, lastPt.y);
+    const pt = session.pt;
+    const p = contentPt(pt.x, pt.y);
     // 삽입 자리가 실제로 바뀔 때만 상태를 갱신한다(포인터가 움직일 때마다 모든 칸의 틈 계산이 다시 돌지 않게)
     const sp = dropAt(geom, p.x, p.y);
     const cur = drag.spot;
     if (sp.before !== cur.before || sp.line.x !== cur.line.x || sp.line.y !== cur.line.y) drag.spot = sp;
     // 파일 목록 항목 위면(마우스만) 재정렬이 아니라 그 파일로 복사하는 드래그다
-    const el = press?.mouse ? (document.elementFromPoint(lastPt.x, lastPt.y)?.closest('[data-droppable]') as HTMLElement | null) : null;
+    const el = session.dropElement();
     const target: DropTarget | null = el ? (el.dataset.newFile != null ? 'new' : Number(el.dataset.tabKey)) : null;
     if (target !== drag.target) {
       drag.target = target;
       drag.targetName = el?.dataset.tabName ?? '';
       ondragtab({ over: target });
     }
-    edgeV = target != null ? 0 : lastPt.y < r.top + EDGE ? -1 : lastPt.y > r.bottom - EDGE ? 1 : 0;
-    ghost?.move(lastPt.x, lastPt.y);
-    ghost?.setLabel(ghostLabel());
-    ghost?.setTabMode(target != null);
+    session.edgeV = target != null ? 0 : pt.y < r.top + EDGE ? -1 : pt.y > r.bottom - EDGE ? 1 : 0;
+    session.ghost?.move(pt.x, pt.y);
+    session.ghost?.setLabel(ghostLabel());
+    session.ghost?.setTabMode(target != null);
   }
 
-  function dragEdgeLoop() {
-    if (edgeRaf) return;
-    const tick = () => {
-      edgeRaf = 0;
-      if (!drag) return;
-      if (edgeV) {
-        scroller.scrollTop += edgeV * 14;
-        updateDrag();
-      }
-      edgeRaf = requestAnimationFrame(tick);
-    };
-    edgeRaf = requestAnimationFrame(tick);
-  }
-
-  /** 끌기를 끝낸다. 놓은 것이 아니라 취소·중단이면 고스트가 원래 자리로 되돌아간다 */
-  function endDrag(dropped = false) {
-    window.removeEventListener('pointermove', onMove);
-    window.removeEventListener('pointerup', onUp);
-    window.removeEventListener('pointercancel', cancelDrag);
-    window.removeEventListener('keydown', onDragKey, true);
-    if (edgeRaf) cancelAnimationFrame(edgeRaf);
-    edgeRaf = 0;
-    edgeV = 0;
-    press = null;
-    if (drag) ondragtab(null);
-    const g = ghost;
-    ghost = null;
-    if (g && !dropped) {
-      const m = drag?.moving ?? [];
-      returning = m;
-      void g.cancel().then(() => {
-        if (returning === m) returning = [];
-      });
-    } else g?.destroy();
-    drag = null;
-  }
-  const cancelDrag = () => endDrag(false);
-
-  function onUp(e: PointerEvent) {
-    if (!press || e.pointerId !== press.id) return;
-    const d = drag;
-    if (d) {
-      updateDrag();
-      suppressClick();
-      const { before } = drag!.spot;
-      const target = drag!.target;
-      const rects = ghost?.release() ?? [];
-      endDrag(true);
-      if (target != null) ontabdrop(d.moving, target, rects);
-      else {
-        // 놓은 쪽들은 고스트가 있던 자리(부채꼴 카드)에서 새 자리로 흩어져 내려앉는다
-        const starts = new Map<number, ScreenRect>();
-        const grabbed = press0?.index ?? d.moving[0];
-        const ord = [grabbed, ...d.moving.filter((m) => m !== grabbed)];
-        ord.forEach((m, k) => {
-          const r = rects[Math.min(k, rects.length - 1)];
-          if (r) starts.set(m, r);
-        });
-        onreorder(d.moving, before, starts);
-      }
-    } else endDrag(true);
-  }
-
-  function onDragKey(e: KeyboardEvent) {
-    if (e.key === 'Escape' && drag) {
-      e.stopPropagation();
-      suppressClick();
-      endDrag(false);
-    }
-  }
+  const canvasOf = (i: number) => scroller.querySelector<HTMLCanvasElement>(`[data-thumb="${i}"] canvas`);
 
   // ---------- 길게 누르기(터치) = 우클릭 메뉴 ----------
   let longTimer = 0;
@@ -511,7 +442,7 @@
   function onKey(e: KeyboardEvent) {
     const t = e.target as HTMLElement;
     if (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA') return;
-    if (!n) return;
+    if (!n || gestureActive()) return; // 누르거나 끄는 중에는 선택·삭제 키를 받지 않는다
     const k = e.key;
     if ((e.ctrlKey || e.metaKey) && !e.altKey && k.toLowerCase() === 'a') {
       e.preventDefault();
@@ -654,7 +585,7 @@
       ro.disconnect();
       scroller.removeEventListener('wheel', wheel);
       if (raf) cancelAnimationFrame(raf);
-      endDrag(true);
+      session.dispose();
       endBand();
       cancelLong();
     };

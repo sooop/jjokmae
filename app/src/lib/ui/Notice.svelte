@@ -27,7 +27,23 @@
     align?: 'left' | 'right';
     onclose: () => void;
   } = $props();
+
+  // 엔진 메시지(detail)는 마우스 올림(title)뿐 아니라 키보드·터치로도 펼쳐 볼 수 있다
+  let open = $state(false);
 </script>
+
+{#snippet inner()}
+  <span class="mark" aria-hidden="true"><Icon name={kind === 'error' ? 'alert' : 'info'} size={16} /></span>
+  <p>
+    {text}
+    {#if reassure}<span class="reassure">{reassure}</span>{/if}
+    {#if detail && open}<span class="detail" data-testid="notice-detail">{detail}</span>{/if}
+  </p>
+  {#if detail}
+    <IconButton icon="chevron-down" label={open ? '자세한 내용 접기' : '자세한 내용 보기'} expanded={open} onclick={() => (open = !open)} />
+  {/if}
+  <IconButton icon="close" label="안내 닫기" onclick={onclose} />
+{/snippet}
 
 {#if floating}
   <div
@@ -40,12 +56,7 @@
     in:noticeIn|global={{ y: -8 }}
     out:noticeOut|global
   >
-    <span class="mark" aria-hidden="true"><Icon name={kind === 'error' ? 'alert' : 'info'} size={16} /></span>
-    <p>
-      {text}
-      {#if reassure}<span class="reassure">{reassure}</span>{/if}
-    </p>
-    <IconButton icon="close" label="안내 닫기" onclick={onclose} />
+    {@render inner()}
   </div>
 {:else}
   <div class="flow" in:slideDownIn|global={{ h: 120 }} out:slideUpOut|global={{ h: 120 }}>
@@ -56,12 +67,7 @@
       title={detail}
       data-notice={kind}
     >
-      <span class="mark" aria-hidden="true"><Icon name={kind === 'error' ? 'alert' : 'info'} size={16} /></span>
-      <p>
-        {text}
-        {#if reassure}<span class="reassure">{reassure}</span>{/if}
-      </p>
-      <IconButton icon="close" label="안내 닫기" onclick={onclose} />
+      {@render inner()}
     </div>
   </div>
 {/if}
@@ -96,4 +102,5 @@
   .flow { padding: 0; }
   p { margin: 4px 0 0; flex: 1; }
   .reassure { display: block; color: var(--fg-muted); }
+  .detail { display: block; margin-top: 2px; color: var(--fg-muted); font-family: var(--font-mono); font-size: 12px; word-break: break-all; user-select: text; }
 </style>

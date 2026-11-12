@@ -5,6 +5,7 @@
   import type { NoticeData } from './status';
   import IconButton from './ui/IconButton.svelte';
   import Notice from './ui/Notice.svelte';
+  import { restoreFocus } from './ui/restore-focus';
 
   let {
     settings,
@@ -61,7 +62,7 @@
   <IconButton icon="chevron-down" label="저장 옵션" haspopup expanded={open} onclick={() => { open = !open; if (open && notice?.kind === 'info') onclosenotice(); }} />
 
   {#if open}
-    <div class="pop stagger" role="dialog" aria-label="저장 옵션" data-testid="save-options" in:popIn|global={{ origin: 'top right' }}
+    <div class="pop stagger" role="dialog" aria-label="저장 옵션" data-testid="save-options" use:restoreFocus={{ fallback: 'button[aria-label="저장 옵션"]' }} in:popIn|global={{ origin: 'top right' }}
   out:popOut|global={{ origin: 'top right' }}>
       {#each opts as o (o.key)}
         <label class="opt" title={o.hint}>

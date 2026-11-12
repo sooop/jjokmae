@@ -15,12 +15,13 @@
     onclick: (e: MouseEvent) => void;
     disabled?: boolean;
     pressed?: boolean;
-    haspopup?: boolean;
+    /** true 면 'dialog'. 메뉴를 여는 버튼은 'menu' */
+    haspopup?: boolean | 'dialog' | 'menu';
     expanded?: boolean;
   } = $props();
 </script>
 
-<button type="button" class="icon-btn" class:chev={icon === 'chevron-down'} aria-label={label} title={label} {disabled} aria-pressed={pressed} aria-haspopup={haspopup ? 'dialog' : undefined} aria-expanded={expanded} {onclick}>
+<button type="button" class="icon-btn" class:chev={icon === 'chevron-down'} aria-label={label} title={label} {disabled} aria-pressed={pressed} aria-haspopup={haspopup ? (haspopup === true ? 'dialog' : haspopup) : undefined} aria-expanded={expanded} {onclick}>
   <Icon name={icon} />
 </button>
 

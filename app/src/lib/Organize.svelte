@@ -1,7 +1,8 @@
 <script lang="ts">
   // 정리 모드 화면: 왼쪽 파일 목록 + 오른쪽 썸네일 격자(본문 뷰어 없음). 우클릭·길게 누르기 메뉴와 보내기 팝오버를 여기서 맡는다.
   // 문서 목록·활성 문서·쪽 선택·되돌리기 기록은 Workspace 하나를 보기 모드와 공유한다.
-  import type { Snippet } from 'svelte';
+  import { untrack, type Snippet } from 'svelte';
+  import { rangeFill } from './motion';
   import ContextMenu, { type MenuItem } from './ContextMenu.svelte';
   import FileList from './FileList.svelte';
   import PageGrid, { type CtxRequest, type DropTarget } from './PageGrid.svelte';
@@ -46,6 +47,11 @@
 
   /** 쪽을 끌고 있을 때 파일 목록에 알리는 상태 */
   let dragTab = $state<{ over: DropTarget | null } | null>(null);
+  // 끌던 격자가 사라지면(문서 전환·모드 전환) 끌기 알림도 비운다. 격자는 파괴 중에 부모 상태를 쓰지 않는다
+  $effect(() => {
+    void ws.activeKey;
+    untrack(() => (dragTab = null));
+  });
 
   // ---------- 메뉴 ----------
   type MenuState =
@@ -252,6 +258,7 @@
           max={GRID_MAX}
           step="4"
           value={thumb}
+          use:rangeFill={thumb}
           aria-label="썸네일 크기"
           aria-valuetext="{thumb}px"
           oninput={(e) => onthumb(Number(e.currentTarget.value))}
@@ -268,6 +275,7 @@
             scheduler={d.scheduler}
             rev={d.rev}
             gen={d.gen}
+            stateId={d.stateId}
             selected={d.selected}
             anchor={d.anchor}
             {thumb}
@@ -330,7 +338,6 @@
     padding: 0;
     border: 0;
     background: transparent;
-    accent-color: var(--accent);
   }
   .val { min-width: 5ch; font-size: 12px; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
   .gridhost { position: relative; flex: 1; min-height: 0; }

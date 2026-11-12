@@ -263,7 +263,7 @@
     opacity: 0.7;
   }
   .x:hover:not(:disabled) { opacity: 1; background: var(--press); }
-  .tab:not(:hover):not(:focus-within):not(.active) .x { opacity: 0.45; }
+  .tab:not(:hover):not(:focus-within):not(.active) .x { opacity: 0.62; }
   @media (pointer: coarse) {
     .x { width: 36px; height: 36px; min-width: 36px; min-height: 36px; }
   }

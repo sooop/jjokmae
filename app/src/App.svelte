@@ -2,6 +2,7 @@
   import { tick, untrack } from 'svelte';
   import { popIn, popOut, rangeFill, reduced, scrimFade } from './lib/motion';
   import { noteState } from './lib/motion/page-flip';
+  import { gestureActive } from './lib/drag-session';
   import { captureThumbs, landThumbs } from './lib/motion/mode-flip';
   import type { Annotation, FormField, NewAnnotation, PagePoint, Rect } from './engine/adapter';
   import AnnotToolbar from './lib/AnnotToolbar.svelte';
@@ -59,6 +60,12 @@
   let mergeRoot: HTMLDivElement | undefined = $state();
   /** 썸네일을 끌고 있을 때 탭 막대에 알리는 상태 */
   let dragTab = $state<{ over: number | null } | null>(null);
+  // 끌던 썸네일 패널이 사라지면(문서·모드 전환) 탭 막대의 끌기 표시도 지운다
+  $effect(() => {
+    void ws.activeKey;
+    void ws.mode;
+    untrack(() => (dragTab = null));
+  });
 
   // 주석·양식 편집 상태(활성 문서 하나에 대한 것. 문서를 바꾸면 초기화한다)
   const ui = new AnnotUi();
@@ -108,6 +115,12 @@
   function onZoomSlide(e: Event & { currentTarget: HTMLInputElement }) {
     let z = sliderToZoom(Number(e.currentTarget.value));
     if (sliding && Math.abs(z - 1) < 0.025) z = 1; // 100% 근처에서 달라붙는다
+    dragZoom = z;
+    clearTimeout(zoomTimer);
+    zoomTimer = window.setTimeout(commitZoom, 220);
+  }
+  /** 뷰어의 Ctrl+휠·핀치: 슬라이더를 끄는 것과 같은 길(즉시 변환 → 멈추면 확정) */
+  function onWheelZoom(z: number) {
     dragZoom = z;
     clearTimeout(zoomTimer);
     zoomTimer = window.setTimeout(commitZoom, 220);
@@ -512,6 +525,11 @@
   function onKey(e: KeyboardEvent) {
     const t = e.target as HTMLElement | null;
     const typing = !!t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+    // 쪽을 누르거나 끄는 중에는 구조를 바꾸는 단축키(되돌리기·탭 닫기·모드 전환·삭제 등)를 받지 않는다. Esc 는 끌기 쪽이 먼저 받아 취소한다
+    if (gestureActive() && e.key !== 'Escape') {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && ['s', 'p', 'o', 'w', 'z', 'y', 'tab'].includes(e.key.toLowerCase())) e.preventDefault();
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && !e.altKey) {
       const k = e.key.toLowerCase();
       if (k === 's') {
@@ -810,6 +828,7 @@
           {#each [doc] as d (d.key)}
             <Thumbnails
               gen={d.gen}
+              stateId={d.stateId}
               sizes={d.sizes}
               current={d.current}
               scheduler={d.scheduler}
@@ -875,6 +894,7 @@
               rev={d.rev}
               overlay={pageOverlay}
               ondraw={(i, r) => (ui.drawn[i] = r)}
+              onwheelzoom={onWheelZoom}
             />
           {/each}
         {:else}
@@ -895,7 +915,8 @@
     {/if}
 
     {#if drawerOpen}
-      <div class="scrim" aria-hidden="true" in:scrimFade out:scrimFade={{ out: true }}></div>
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div class="scrim" aria-hidden="true" onclick={() => (drawerOpen = false)} in:scrimFade out:scrimFade={{ out: true }}></div>
       <SettingsDrawer settings={{ ...settings, zoom: curZoom }} docOpen={!!doc} onchange={onSettingsChange} onclose={() => (drawerOpen = false)} />
     {/if}
   </div>
@@ -953,7 +974,7 @@
     animation: bob 1.1s var(--ease-in-out) infinite alternate;
   }
   @keyframes bob { from { transform: translateY(5px) scale(0.96); } to { transform: translateY(-5px) scale(1.04); } }
-  .scrim { position: absolute; inset: 0; z-index: 15; background: var(--scrim); opacity: 0.5; pointer-events: none; }
+  .scrim { position: absolute; inset: 0; z-index: 15; background: var(--scrim); opacity: 0.5; }
   @media (prefers-reduced-motion: reduce) { .veil-ico { animation: none; } }
   .side {
     position: relative;

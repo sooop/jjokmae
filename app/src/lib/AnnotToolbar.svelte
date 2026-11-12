@@ -231,5 +231,5 @@
   .type { color: var(--fg-muted); white-space: nowrap; }
   .content-wrap { position: relative; width: min(300px, 36vw); height: 32px; }
   .content { position: absolute; left: 0; top: 0; width: 100%; height: 32px; min-height: 32px; resize: none; overflow: hidden; line-height: 1.3; }
-  .content:focus { height: 96px; z-index: 20; overflow: auto; box-shadow: 0 4px 16px rgb(0 0 0 / 0.16); }
+  .content:focus { height: 96px; z-index: 20; overflow: auto; box-shadow: var(--shadow-2); }
 </style>

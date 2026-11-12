@@ -77,9 +77,10 @@ export class PrintJob {
           const bytes = await this.ws.printCopy(spec.parts);
           if (this.cancelFlag.value) return false;
           try {
-            await printViaIframe(bytes);
+            await printViaIframe(bytes, this.cancelFlag);
             return true;
           } catch (e) {
+            if (e instanceof PrintCancelled) return false;
             if (!(e instanceof FrameError)) throw e;
             if (this.cancelFlag.value) return false;
             this.note = { kind: 'info', text: '이 브라우저에서는 PDF 로 바로 인쇄할 수 없어 이미지 방식으로 인쇄합니다.', detail: e.message };

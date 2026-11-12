@@ -16,6 +16,7 @@
   import { onMount, tick, untrack } from 'svelte';
   import { popIn, popOut } from './motion';
   import Icon from './ui/Icon.svelte';
+  import { restoreFocus } from './ui/restore-focus';
 
   let {
     x,
@@ -179,6 +180,7 @@
   onkeydown={onKey}
   oncontextmenu={(e) => e.preventDefault()}
   data-testid="context-menu"
+  use:restoreFocus={{ fallback: ['[data-testid=grid]', '[data-testid=file][aria-selected=true]'] }}
   in:popIn|global={{ origin: 'top left', from: 0.88, y: -4 }}
   out:popOut|global={{ origin: 'top left' }}
 >

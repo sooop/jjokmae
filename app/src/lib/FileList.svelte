@@ -20,6 +20,7 @@
   import Icon from './ui/Icon.svelte';
   import IconButton from './ui/IconButton.svelte';
   import Notice from './ui/Notice.svelte';
+  import { restoreFocus } from './ui/restore-focus';
 
   let {
     files,
@@ -58,6 +59,47 @@
   } = $props();
 
   let moreOpen = $state(false);
+  let moreRoot: HTMLDivElement | undefined = $state();
+  let moreMenu: HTMLDivElement | undefined = $state();
+  // 고른 쪽이 없어지면 메뉴는 닫힌다
+  $effect(() => {
+    if (moreOpen && selTotal === 0) moreOpen = false;
+  });
+  // 열려 있는 동안: 바깥 누르기·Esc(포커스 위치와 무관)로 닫고, 열릴 때 첫 항목으로 포커스
+  $effect(() => {
+    if (!moreOpen) return;
+    const down = (e: PointerEvent) => {
+      if (moreRoot && !moreRoot.contains(e.target as Node)) moreOpen = false;
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      e.preventDefault();
+      moreOpen = false;
+    };
+    window.addEventListener('pointerdown', down, true);
+    window.addEventListener('keydown', key, true);
+    void tick().then(() => moreMenu?.querySelector<HTMLElement>('[role=menuitem]')?.focus());
+    return () => {
+      window.removeEventListener('pointerdown', down, true);
+      window.removeEventListener('keydown', key, true);
+    };
+  });
+  function onMoreKey(e: KeyboardEvent) {
+    const items = Array.from(moreMenu?.querySelectorAll<HTMLElement>('[role=menuitem]') ?? []);
+    if (!items.length) return;
+    const i = items.indexOf(document.activeElement as HTMLElement);
+    let to = -1;
+    if (e.key === 'ArrowDown') to = (i + 1) % items.length;
+    else if (e.key === 'ArrowUp') to = (i - 1 + items.length) % items.length;
+    else if (e.key === 'Home') to = 0;
+    else if (e.key === 'End') to = items.length - 1;
+    else if (e.key === 'Tab') moreOpen = false;
+    if (to >= 0) {
+      e.preventDefault();
+      items[to].focus();
+    }
+  }
   let listEl: HTMLDivElement | undefined = $state();
   /** 활성 항목 표시: 항목 사이를 스프링으로 미끄러진다 */
   let ink = $state<{ y: number; h: number } | null>(null);
@@ -151,10 +193,10 @@
       <button type="button" class="allnew" disabled={busy || selTotal === 0} onclick={() => onsendall('copy')} data-testid="send-all-new">
         선택한 쪽 모두 → 새 파일{selTotal ? ` (${selTotal})` : ''}
       </button>
-      <div class="more">
-        <IconButton icon="chevron-down" label="선택한 쪽 모두 보내기 방식" haspopup expanded={moreOpen} disabled={busy || selTotal === 0} onclick={() => (moreOpen = !moreOpen)} />
+      <div class="more" bind:this={moreRoot}>
+        <IconButton icon="chevron-down" label="선택한 쪽 모두 보내기 방식" haspopup="menu" expanded={moreOpen} disabled={busy || selTotal === 0} onclick={() => (moreOpen = !moreOpen)} />
         {#if moreOpen}
-          <div class="mini stagger" role="menu" tabindex="-1" in:popIn|global={{ origin: 'top right' }} out:popOut|global={{ origin: 'top right' }} onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), (moreOpen = false))}>
+          <div class="mini stagger" role="menu" tabindex="-1" bind:this={moreMenu} use:restoreFocus={{ fallback: 'button[aria-label="선택한 쪽 모두 보내기 방식"]' }} in:popIn|global={{ origin: 'top right' }} out:popOut|global={{ origin: 'top right' }} onkeydown={onMoreKey}>
             <button type="button" role="menuitem" onclick={() => { moreOpen = false; onsendall('copy'); }}>복사 → 새 파일</button>
             <button type="button" role="menuitem" title="원본 파일들에서 지우고 새 파일로 옮깁니다. 되돌리기는 함께 적용됩니다" onclick={() => { moreOpen = false; onsendall('move'); }} data-testid="send-all-move">이동 → 새 파일</button>
           </div>
@@ -226,7 +268,7 @@
     class:droppable={dragging}
     class:over={dragOver === 'new'}
     role="note"
-    title="빈 칸입니다. 쪽을 끌어다 놓으면 그 쪽만 든 새 파일이 만들어집니다. 클릭해도 아무것도 만들어지지 않습니다."
+    title="쪽을 끌어다 놓으면 그 쪽만 든 새 파일이 만들어집니다"
     data-new-file=""
     data-tab-name="새 파일"
     data-droppable={dragging ? '' : undefined}
