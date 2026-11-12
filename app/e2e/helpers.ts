@@ -626,7 +626,8 @@ export class App {
   /** 떠 있는 안내(저장 옵션 등을 가릴 수 있다)를 모두 닫는다 */
   async dismissNotices() {
     const close = this.notices().getByRole('button', { name: '안내 닫기' });
-    while ((await close.count()) > 0) await close.first().click();
+    // 안내는 스스로 사라지기도 하고(퇴장 모션 중에도 남아 있다) 눌러도 같은 순간에 사라질 수 있어, 못 누르면 다시 센다
+    for (let i = 0; i < 12 && (await close.count()) > 0; i++) await close.first().click({ timeout: 2000 }).catch(() => {});
     await expect(this.notices()).toHaveCount(0);
   }
   async noticeTexts(): Promise<string[]> {
@@ -751,7 +752,7 @@ export const test = base.extend<{ app: App; mkApp: (opts?: { viewport?: { width:
   mkApp: async ({ browser }, use, testInfo) => {
     const made: { close(): Promise<void> }[] = [];
     await use(async (opts) => {
-      const ctx = await browser.newContext({ acceptDownloads: true, viewport: opts?.viewport ?? { width: 1400, height: 900 } });
+      const ctx = await browser.newContext({ acceptDownloads: true, viewport: opts?.viewport ?? { width: 1400, height: 900 }, reducedMotion: 'reduce' });
       made.push(ctx);
       const page = await ctx.newPage();
       const kind = testInfo.project.name as BuildKind;

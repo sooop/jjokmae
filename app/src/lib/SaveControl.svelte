@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { popIn, popOut } from './motion';
   // 저장 버튼(항상 새 파일로 내려받기) + 저장 옵션 팝오버. 저장 직후의 안내는 이 버튼 아래에 붙는다.
   import type { Settings } from './settings';
   import type { NoticeData } from './status';
@@ -57,10 +58,11 @@
   <button type="button" class="primary" disabled={busy} onclick={onsave} title="새 파일로 내려받기 (Ctrl+S). 원본은 바뀌지 않습니다." data-testid="save">
     {saving ? '저장 중…' : '저장'}
   </button>
-  <IconButton icon="chevron-down" label="저장 옵션" haspopup expanded={open} onclick={() => (open = !open)} />
+  <IconButton icon="chevron-down" label="저장 옵션" haspopup expanded={open} onclick={() => { open = !open; if (open && notice?.kind === 'info') onclosenotice(); }} />
 
   {#if open}
-    <div class="pop" role="dialog" aria-label="저장 옵션" data-testid="save-options">
+    <div class="pop stagger" role="dialog" aria-label="저장 옵션" data-testid="save-options" in:popIn|global={{ origin: 'top right' }}
+  out:popOut|global={{ origin: 'top right' }}>
       {#each opts as o (o.key)}
         <label class="opt" title={o.hint}>
           <input
@@ -79,7 +81,7 @@
     </div>
   {/if}
 
-  {#if notice}
+  {#if notice && !open}
     <Notice floating kind={notice.kind} text={notice.text} reassure={notice.reassure} detail={notice.detail} onclose={onclosenotice} />
   {/if}
 </div>
@@ -97,11 +99,10 @@
     padding: 8px;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: 0 4px 16px rgb(0 0 0 / 0.16);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-2), var(--edge);
   }
   .opt { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 4px; cursor: pointer; color: var(--fg); font-size: 14px; }
-  .opt input { min-height: 0; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
   .warn { margin: 4px 4px 2px; font-size: 12px; color: var(--fg-muted); line-height: 1.5; word-break: keep-all; }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 </style>

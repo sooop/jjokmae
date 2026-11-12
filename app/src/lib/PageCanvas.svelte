@@ -29,6 +29,7 @@
   } = $props();
 
   let canvas: HTMLCanvasElement;
+  let ready = $state(false);
   let drawnScale = 0;
   let drawnRev = -1;
 
@@ -38,6 +39,7 @@
     canvas.height = 0;
     drawnScale = 0;
     drawnRev = -1;
+    ready = false;
   }
 
   $effect(() => {
@@ -69,6 +71,7 @@
       bmp.close();
       drawnScale = s;
       drawnRev = r;
+      ready = true;
       const dt = performance.now() - t0;
       stats.draws++;
       stats.drawMs += dt;
@@ -84,12 +87,19 @@
   $effect(() => release);
 </script>
 
-<canvas bind:this={canvas} width="0" height="0"></canvas>
+<canvas bind:this={canvas} class:ready width="0" height="0"></canvas>
 
 <style>
   canvas {
     display: block;
     width: 100%;
     height: 100%;
+  }
+  /* 자리표시에서 실제 이미지로: 처음 그려질 때만 부드럽게 나타난다 */
+  canvas.ready { animation: kf-fade var(--dur-base) var(--ease-out); }
+  /* 빠르게 스크롤하는 동안은 새로 그려진 쪽을 바로 보인다(수십 장이 동시에 페이드하면 프레임이 끊긴다) */
+  :global([data-scrolling]) canvas.ready { animation: none; }
+  @media print {
+    canvas { animation: none !important; opacity: 1 !important; }
   }
 </style>

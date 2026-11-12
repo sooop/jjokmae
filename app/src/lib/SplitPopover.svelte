@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { popIn, popOut } from './motion';
   // 분할 팝오버: 쪽 범위('1-3,5,8-') 또는 'N쪽마다'. 결과는 ZIP 하나로 내려받는다.
   import { onMount } from 'svelte';
   import { chunkEvery, parseRanges } from './ranges';
@@ -41,7 +42,8 @@
   }
 </script>
 
-<div class="pop" role="dialog" aria-label="나누기" data-testid="split-pop" onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), onclose())} tabindex="-1">
+<div class="pop stagger" in:popIn|global={{ origin: 'top right' }}
+  out:popOut|global={{ origin: 'top right' }} role="dialog" aria-label="나누기" data-testid="split-pop" onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), onclose())} tabindex="-1">
   <label class="row">
     <input type="radio" name="split-mode" value="ranges" bind:group={mode} />
     <span>쪽 범위로 나누기</span>
@@ -94,12 +96,12 @@
     padding: 10px;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: 0 4px 16px rgb(0 0 0 / 0.16);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-2), var(--edge);
     outline: none;
   }
   .row { display: flex; align-items: center; gap: 8px; min-height: 28px; }
-  .row input { min-height: 0; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+
   .field { width: 100%; }
   .field:disabled { opacity: 0.5; }
   .err { margin: 0; font-size: 13px; color: var(--danger); line-height: 1.5; word-break: keep-all; }

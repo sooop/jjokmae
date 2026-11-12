@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { popIn, popOut } from './motion';
   // 열린 파일 병합: 파일을 체크하고 위/아래 버튼으로 순서를 정해 새 탭 하나로 만든다. 원본 탭은 그대로 둔다.
   import { onMount } from 'svelte';
   import type { MergeDoc } from './transfer';
@@ -47,7 +48,8 @@
   }
 </script>
 
-<div class="pop" bind:this={root} role="dialog" aria-label="열린 파일 병합" data-testid="merge-pop" onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), onclose())} tabindex="-1">
+<div class="pop stagger" bind:this={root} in:popIn|global={{ origin: 'top left' }}
+  out:popOut|global={{ origin: 'top left' }} role="dialog" aria-label="열린 파일 병합" data-testid="merge-pop" onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), onclose())} tabindex="-1">
   <p class="head">열린 파일 병합</p>
   <ul>
     {#each rows as d, i (d.key)}
@@ -90,15 +92,15 @@
     padding: 10px;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: 0 4px 16px rgb(0 0 0 / 0.16);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-2), var(--edge);
     outline: none;
   }
   .head { margin: 0; font-weight: 600; }
   ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; max-height: 50vh; overflow-y: auto; }
   li { display: flex; align-items: center; gap: 2px; min-width: 0; }
   .nm { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; min-height: 32px; cursor: pointer; }
-  .nm input { min-height: 0; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); flex: none; }
+
   .nm span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .meta { flex: none; font-size: 12px; color: var(--fg-muted); font-variant-numeric: tabular-nums; margin-right: 4px; }
   .btns { display: flex; justify-content: flex-end; gap: 8px; }

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { popIn, popOut } from './motion';
   // 쪽 보내기 팝오버: 복사/이동 → 대상(새 파일·열린 파일) → 위치(맨 앞·맨 뒤·특정 쪽 뒤).
   import { onMount, untrack } from 'svelte';
   import type { SendPos, SendTargetRow } from './transfer';
@@ -58,7 +59,8 @@
   }
 </script>
 
-<div class="pop" role="dialog" aria-label="쪽 보내기" data-testid="send-pop" onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), onclose())} tabindex="-1">
+<div class="pop stagger" role="dialog" aria-label="쪽 보내기" data-testid="send-pop" in:popIn|global={{ origin: 'top left' }}
+  out:popOut|global={{ origin: 'top left' }} onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), onclose())} tabindex="-1">
   <p class="head">{count}쪽 보내기</p>
 
   <div class="seg" role="radiogroup" aria-label="보내는 방식">
@@ -137,20 +139,15 @@
     padding: 10px;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: 0 4px 16px rgb(0 0 0 / 0.16);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-2), var(--edge);
     outline: none;
   }
   .head { margin: 0; font-weight: 600; }
-  .seg { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
-  .seg label { position: relative; display: grid; place-items: center; min-height: 32px; cursor: pointer; }
-  .seg label.on { background: var(--accent); color: var(--accent-fg); }
-  .seg input { position: absolute; opacity: 0; pointer-events: none; }
-  .seg label:has(input:focus-visible) { outline: 2px solid var(--fg); outline-offset: -2px; }
   fieldset { margin: 0; padding: 0; border: 0; display: grid; gap: 0; min-width: 0; }
   legend { padding: 0; margin-bottom: 2px; font-size: 12px; color: var(--fg-muted); font-weight: 600; }
   .opt { display: flex; align-items: center; gap: 8px; min-height: 32px; cursor: pointer; min-width: 0; }
-  .opt input[type='radio'] { min-height: 0; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); flex: none; }
+
   .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .meta { flex: none; font-size: 12px; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
   .num { width: 64px; text-align: center; }

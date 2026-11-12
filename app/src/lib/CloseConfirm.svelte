@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { popIn, popOut } from './motion';
   // 저장하지 않은 변경이 있는 파일을 닫을 때의 확인 안내. 상단 탭 막대와 정리 모드 파일 목록이 같은 카드를 쓴다.
   // 위치는 부모가 정한다(이 카드는 위치를 정하지 않는다).
   import { onMount } from 'svelte';
@@ -24,6 +25,8 @@
   class="confirm"
   class:fluid
   role="alertdialog"
+  in:popIn|global={{ origin: 'top left', from: 0.92 }}
+  out:popOut|global={{ origin: 'top left' }}
   aria-label="저장하지 않은 변경"
   tabindex="-1"
   onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), onconfirm('cancel'))}
@@ -46,8 +49,8 @@
     padding: 10px;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: 0 4px 16px rgb(0 0 0 / 0.16);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-3), var(--edge);
     outline: none;
   }
   .fluid { width: 100%; }

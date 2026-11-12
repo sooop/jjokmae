@@ -15,7 +15,9 @@
   // 선택은 부모(DocState.selected)와 공유한다. 이 컴포넌트는 선택을 직접 들고 있지 않는다.
   import { onMount, untrack, type Snippet } from 'svelte';
   import type { PageSize } from '../engine/adapter';
-  import { bandHits, cellAt, cellRect, dropAt, GRID_ASPECT, gridGeom, moveFocus, renderBucket, visibleRows, type DropSpot } from './grid';
+  import { bandHits, cellRect, dropAt, GRID_ASPECT, GRID_LABEL, gridGeom, moveFocus, renderBucket, visibleRows, type DropSpot } from './grid';
+  import { DragGhost, type ScreenRect } from './motion/drag-ghost';
+  import { notifyUpdated, registerHost, type PageHost } from './motion/page-flip';
   import type { RenderScheduler } from './render-queue';
   import { clickSelect, span } from './selection';
   import { GRID_MAX, GRID_MIN } from './settings';
@@ -57,9 +59,9 @@
     onscrollpos?: (top: number) => void;
     onchange: (selected: number[], anchor: number | null) => void;
     /** 격자 안에서 놓았을 때: moving 쪽들을 before 번 쪽 앞(n 이면 맨 끝)으로 */
-    onreorder: (moving: number[], before: number) => void;
-    /** 왼쪽 파일 목록의 항목이나 '새 파일' 칸 위에 놓았을 때(마우스) */
-    ontabdrop: (moving: number[], target: DropTarget) => void;
+    onreorder: (moving: number[], before: number, starts?: Map<number, ScreenRect>) => void;
+    /** 왼쪽 파일 목록의 항목이나 '새 파일' 칸 위에 놓았을 때(마우스). rects 는 놓은 순간 고스트의 카드 자리 */
+    ontabdrop: (moving: number[], target: DropTarget, rects?: ScreenRect[]) => void;
     /** 끌기 상태 알림: 끌기 시작·이동 중에는 {over}, 끝나면 null */
     ondragtab: (state: { over: DropTarget | null } | null) => void;
     onopen: (index: number) => void;
@@ -125,7 +127,14 @@
       lastTopIdx = Math.min(g.n - 1, Math.max(0, Math.floor((scrollTop + 1 - g.pad) / (g.cellH + g.gap)) * g.cols));
     }
   }
+  let scrollIdle = 0;
   function onScroll() {
+    const el = scroller;
+    if (el) {
+      el.dataset.scrolling = '';
+      clearTimeout(scrollIdle);
+      scrollIdle = window.setTimeout(() => delete el.dataset.scrolling, 160);
+    }
     if (!raf) {
       raf = requestAnimationFrame(() => {
         raf = 0;
@@ -275,16 +284,22 @@
 
   // ---------- 드래그: 격자 안 재정렬 / 파일 목록으로 보내기 ----------
   let drag = $state<{ moving: number[]; spot: DropSpot; x: number; y: number; target: DropTarget | null; targetName: string } | null>(null);
+  let ghost: DragGhost | null = null;
+  /** 취소하고 되돌아가는 동안 원래 자리를 계속 자리표시로 둘 쪽들 */
+  let returning = $state<number[]>([]);
+  const isMoving = (i: number) => (!!drag && drag.moving.includes(i)) || returning.includes(i);
   let press: { x: number; y: number; index: number; handle: boolean; id: number; mouse: boolean } | null = null;
 
+  let press0: { index: number } | null = null;
   function onPress(e: PointerEvent, index: number, handle: boolean) {
     if (press) return;
     if (e.pointerType === 'mouse' ? e.button !== 0 : !handle) return;
+    press0 = { index };
     press = { x: e.clientX, y: e.clientY, index, handle, id: e.pointerId, mouse: e.pointerType === 'mouse' };
     lastPt = { x: e.clientX, y: e.clientY };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
-    window.addEventListener('pointercancel', endDrag);
+    window.addEventListener('pointercancel', cancelDrag);
     window.addEventListener('keydown', onDragKey, true);
   }
 
@@ -298,6 +313,7 @@
       const moving = selSet.has(idx) && selected.length > 1 ? [...selected].sort((a, b) => a - b) : [idx];
       const p = contentPt(e.clientX, e.clientY);
       drag = { moving, spot: dropAt(geom, p.x, p.y), x: e.clientX, y: e.clientY, target: null, targetName: '' };
+      startGhost(moving, idx, e.clientX, e.clientY);
       ondragtab({ over: null });
       dragEdgeLoop();
     }
@@ -305,13 +321,51 @@
     updateDrag();
   }
 
+  function frameRectOf(i: number): ScreenRect | null {
+    const f = scroller.querySelector<HTMLElement>(`[data-thumb="${i}"] .frame`);
+    if (!f) return null;
+    const r = f.getBoundingClientRect();
+    return { x: r.left, y: r.top, w: r.width, h: r.height };
+  }
+  const canvasOf = (i: number) => scroller.querySelector<HTMLCanvasElement>(`[data-thumb="${i}"] canvas`);
+
+  function startGhost(moving: number[], grabbed: number, x: number, y: number) {
+    ghost?.destroy();
+    const origin = frameRectOf(grabbed);
+    if (!origin) {
+      ghost = null;
+      return;
+    }
+    // 집은 쪽이 맨 위, 나머지는 번호순으로 최대 4장
+    const order = [grabbed, ...moving.filter((m) => m !== grabbed)];
+    ghost = new DragGhost({
+      cards: order.slice(0, 4).map((i) => ({ canvas: canvasOf(i) })),
+      count: moving.length,
+      pointer: { x, y },
+      origin,
+      label: ghostLabel(),
+    });
+  }
+  function ghostLabel(): string {
+    const d = drag;
+    if (!d) return '';
+    return d.target === 'new'
+      ? `${d.moving.length}쪽을 새 파일로 복사`
+      : d.target != null
+        ? `${d.moving.length}쪽을 ‘${d.targetName}’ 끝에 복사`
+        : d.moving.length > 1
+          ? `${d.moving.length}쪽 이동`
+          : `${d.moving[0] + 1}쪽 이동`;
+  }
+
   function updateDrag() {
     if (!drag) return;
     const r = scroller.getBoundingClientRect();
-    drag.x = lastPt.x;
-    drag.y = lastPt.y;
     const p = contentPt(lastPt.x, lastPt.y);
-    drag.spot = dropAt(geom, p.x, p.y);
+    // 삽입 자리가 실제로 바뀔 때만 상태를 갱신한다(포인터가 움직일 때마다 모든 칸의 틈 계산이 다시 돌지 않게)
+    const sp = dropAt(geom, p.x, p.y);
+    const cur = drag.spot;
+    if (sp.before !== cur.before || sp.line.x !== cur.line.x || sp.line.y !== cur.line.y) drag.spot = sp;
     // 파일 목록 항목 위면(마우스만) 재정렬이 아니라 그 파일로 복사하는 드래그다
     const el = press?.mouse ? (document.elementFromPoint(lastPt.x, lastPt.y)?.closest('[data-droppable]') as HTMLElement | null) : null;
     const target: DropTarget | null = el ? (el.dataset.newFile != null ? 'new' : Number(el.dataset.tabKey)) : null;
@@ -321,6 +375,9 @@
       ondragtab({ over: target });
     }
     edgeV = target != null ? 0 : lastPt.y < r.top + EDGE ? -1 : lastPt.y > r.bottom - EDGE ? 1 : 0;
+    ghost?.move(lastPt.x, lastPt.y);
+    ghost?.setLabel(ghostLabel());
+    ghost?.setTabMode(target != null);
   }
 
   function dragEdgeLoop() {
@@ -337,18 +394,29 @@
     edgeRaf = requestAnimationFrame(tick);
   }
 
-  function endDrag() {
+  /** 끌기를 끝낸다. 놓은 것이 아니라 취소·중단이면 고스트가 원래 자리로 되돌아간다 */
+  function endDrag(dropped = false) {
     window.removeEventListener('pointermove', onMove);
     window.removeEventListener('pointerup', onUp);
-    window.removeEventListener('pointercancel', endDrag);
+    window.removeEventListener('pointercancel', cancelDrag);
     window.removeEventListener('keydown', onDragKey, true);
     if (edgeRaf) cancelAnimationFrame(edgeRaf);
     edgeRaf = 0;
     edgeV = 0;
     press = null;
     if (drag) ondragtab(null);
+    const g = ghost;
+    ghost = null;
+    if (g && !dropped) {
+      const m = drag?.moving ?? [];
+      returning = m;
+      void g.cancel().then(() => {
+        if (returning === m) returning = [];
+      });
+    } else g?.destroy();
     drag = null;
   }
+  const cancelDrag = () => endDrag(false);
 
   function onUp(e: PointerEvent) {
     if (!press || e.pointerId !== press.id) return;
@@ -358,17 +426,28 @@
       suppressClick();
       const { before } = drag!.spot;
       const target = drag!.target;
-      endDrag();
-      if (target != null) ontabdrop(d.moving, target);
-      else onreorder(d.moving, before);
-    } else endDrag();
+      const rects = ghost?.release() ?? [];
+      endDrag(true);
+      if (target != null) ontabdrop(d.moving, target, rects);
+      else {
+        // 놓은 쪽들은 고스트가 있던 자리(부채꼴 카드)에서 새 자리로 흩어져 내려앉는다
+        const starts = new Map<number, ScreenRect>();
+        const grabbed = press0?.index ?? d.moving[0];
+        const ord = [grabbed, ...d.moving.filter((m) => m !== grabbed)];
+        ord.forEach((m, k) => {
+          const r = rects[Math.min(k, rects.length - 1)];
+          if (r) starts.set(m, r);
+        });
+        onreorder(d.moving, before, starts);
+      }
+    } else endDrag(true);
   }
 
   function onDragKey(e: KeyboardEvent) {
     if (e.key === 'Escape' && drag) {
       e.stopPropagation();
       suppressClick();
-      endDrag();
+      endDrag(false);
     }
   }
 
@@ -471,13 +550,96 @@
     }
   }
 
+  // ---------- 쪽 이동 연출(FLIP) 호스트 ----------
+  let flyLayer: HTMLDivElement | undefined = $state();
+  let holding = $state(false);
+  const fitFor = (g: ReturnType<typeof gridGeom>, s: PageSize) => Math.min(g.cellW / s.width, Math.round(g.cellW * GRID_ASPECT) / s.height);
+  const host: PageHost = {
+    layer: () => flyLayer ?? null,
+    sizes: () => sizes,
+    frameRect: (idx, sz) => {
+      const g = gridGeom(W, thumb, sz.length);
+      const r = cellRect(g, idx);
+      const s = sz[idx];
+      const f = fitFor(g, s);
+      const fw = s.width * f;
+      const fh = s.height * f;
+      return { x: r.x + (r.w - fw) / 2, y: r.y + r.h - (fh + GRID_LABEL - 2), w: fw, h: fh };
+    },
+    viewport: () => ({ top: scroller.scrollTop, bottom: scroller.scrollTop + scroller.clientHeight }),
+    canvas: (i) => canvasOf(i),
+    checked: (i) => selSet.has(i),
+    setHolding: (on) => (holding = on),
+  };
+  // 문서 화면이 다시 만들어지면(gen) 연출에 알린다
+  let lastGen = untrack(() => gen);
+  $effect(() => {
+    const g = gen;
+    if (g !== lastGen) {
+      lastGen = g;
+      untrack(() => notifyUpdated());
+    }
+  });
+
+  // ---------- 영역 선택 상자: 모서리가 스프링으로 따라온다 ----------
+  let bandEl: HTMLDivElement | undefined = $state();
+  let bandCur = { x: 0, y: 0, w: 0, h: 0 };
+  let bandRaf = 0;
+  function bandSmooth() {
+    if (bandRaf) return;
+    let last = performance.now();
+    const tick = (t: number) => {
+      bandRaf = 0;
+      const el = bandEl;
+      const b = band;
+      if (!el || !b) return;
+      const dt = Math.min(0.05, (t - last) / 1000);
+      last = t;
+      const k = 1 - Math.exp(-dt * 38);
+      bandCur.x += (b.x - bandCur.x) * k;
+      bandCur.y += (b.y - bandCur.y) * k;
+      bandCur.w += (b.w - bandCur.w) * k;
+      bandCur.h += (b.h - bandCur.h) * k;
+      el.style.transform = `translate(${bandCur.x}px,${bandCur.y}px)`;
+      el.style.width = `${bandCur.w}px`;
+      el.style.height = `${bandCur.h}px`;
+      const settled = Math.abs(b.x - bandCur.x) + Math.abs(b.y - bandCur.y) + Math.abs(b.w - bandCur.w) + Math.abs(b.h - bandCur.h) < 0.4;
+      if (!settled) bandRaf = requestAnimationFrame(tick);
+    };
+    bandRaf = requestAnimationFrame(tick);
+  }
+  $effect(() => {
+    const b = band;
+    if (!b) {
+      bandCur = { x: 0, y: 0, w: 0, h: 0 };
+      return;
+    }
+    if (!bandCur.w && !bandCur.h) bandCur = { ...b };
+    untrack(bandSmooth);
+  });
+
+  // ---------- 끌기 중 삽입 자리의 틈: 이웃 칸이 양옆으로 벌어진다 ----------
+  const GAPSHIFT = 12;
+  function shiftOf(i: number): number {
+    const d = drag;
+    if (!d || d.target != null) return 0;
+    const c = cellRect(geom, i);
+    const ln = d.spot.line;
+    if (Math.abs(c.y - ln.y) > 1) return 0;
+    if (Math.abs(c.x + c.w + geom.gap / 2 - ln.x) < 1.5) return -GAPSHIFT;
+    if (Math.abs(c.x - geom.gap / 2 - ln.x) < 1.5) return GAPSHIFT;
+    return 0;
+  }
+
   onMount(() => {
+    const unreg = registerHost(host);
     const ro = new ResizeObserver(() => onScroll());
     ro.observe(scroller);
     const wheel = (e: WheelEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;
       e.preventDefault();
-      const step = e.deltaY < 0 ? 8 : -8;
+      const mag = Math.max(8, Math.round(thumb * 0.06));
+      const step = e.deltaY < 0 ? mag : -mag;
       const v = Math.min(GRID_MAX, Math.max(GRID_MIN, thumb + step));
       if (v !== thumb) onthumb(v);
     };
@@ -487,10 +649,12 @@
     focusIdx = Math.min(Math.max(0, selected[0] ?? 0), Math.max(0, n - 1));
     scroller.focus({ preventScroll: true });
     return () => {
+      unreg();
+      if (bandRaf) cancelAnimationFrame(bandRaf);
       ro.disconnect();
       scroller.removeEventListener('wheel', wheel);
       if (raf) cancelAnimationFrame(raf);
-      endDrag();
+      endDrag(true);
       endBand();
       cancelLong();
     };
@@ -499,6 +663,8 @@
 
 <div
   class="grid"
+  class:holding
+  class:dragging={!!drag}
   bind:this={scroller}
   role="listbox"
   aria-multiselectable="true"
@@ -523,6 +689,7 @@
         {#if s}
           <div
             class="cell"
+            class:shifting={!!drag}
             role="option"
             id="gc-{i}"
             aria-selected={selSet.has(i)}
@@ -532,6 +699,7 @@
             style:top="{r.y}px"
             style:width="{r.w}px"
             style:height="{r.h}px"
+            style:transform={drag && shiftOf(i) ? `translateX(${shiftOf(i)}px)` : undefined}
           >
             <ThumbItem
               index={i}
@@ -541,7 +709,7 @@
               checked={selSet.has(i)}
               grid
               focused={hasFocus && focusIdx === i}
-              moving={!!drag && drag.moving.includes(i)}
+              moving={isMoving(i)}
               visible={i >= win.rA && i <= win.rB}
               scale={renderScale(s)}
               {scheduler}
@@ -557,25 +725,15 @@
         {/if}
       {/each}
     {/key}
+    <div class="fly" bind:this={flyLayer} aria-hidden="true"></div>
     {#if drag && drag.target == null}
-      <div class="drop" style:left="{drag.spot.line.x - 1.5}px" style:top="{drag.spot.line.y}px" style:height="{drag.spot.line.h}px" data-testid="drop-line" data-before={drag.spot.before} aria-hidden="true"></div>
+      <div class="drop" style:transform="translate({drag.spot.line.x - 1.5}px, {drag.spot.line.y}px)" style:height="{drag.spot.line.h}px" data-testid="drop-line" data-before={drag.spot.before} aria-hidden="true"></div>
     {/if}
     {#if band}
-      <div class="band" style:left="{band.x}px" style:top="{band.y}px" style:width="{band.w}px" style:height="{band.h}px" data-testid="band" aria-hidden="true"></div>
+      <div class="band" bind:this={bandEl} data-testid="band" aria-hidden="true"></div>
     {/if}
   </div>
 </div>
-{#if drag}
-  <div class="ghost" style:left="{drag.x + 12}px" style:top="{drag.y + 12}px" aria-hidden="true">
-    {drag.target === 'new'
-      ? `${drag.moving.length}쪽을 새 파일로 복사`
-      : drag.target != null
-        ? `${drag.moving.length}쪽을 ‘${drag.targetName}’ 끝에 복사`
-        : drag.moving.length > 1
-          ? `${drag.moving.length}쪽 이동`
-          : `${drag.moving[0] + 1}쪽 이동`}
-  </div>
-{/if}
 
 <style>
   .grid {
@@ -596,29 +754,36 @@
     align-items: flex-end;
     justify-content: center;
   }
+  /* 끌기 중: 삽입 자리 양옆의 칸이 스프링으로 벌어진다 */
+  .cell.shifting { transition: transform var(--spring-glide-dur) var(--spring-glide); }
+  /* 쪽 이동 연출 중: 새 칸은 비행체가 내려앉을 때까지 가려 둔다 */
+  .holding .cell { visibility: hidden; }
+  /* 끌고 있는 동안은 칸 위에 뜨는 버튼 줄·손잡이를 숨긴다 */
+  .dragging :global(.actions), .dragging :global(.grip) { opacity: 0 !important; visibility: hidden !important; }
+  .fly { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
   .drop {
     position: absolute;
+    left: 0;
+    top: 0;
     width: 3px;
     border-radius: 2px;
     background: var(--fg);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--bg) 70%, transparent), 0 0 12px color-mix(in srgb, var(--fg) 40%, transparent);
     pointer-events: none;
     z-index: 2;
+    transition: transform var(--spring-pop-dur) var(--spring-pop), height var(--dur-fast) var(--ease-out);
+    animation: drop-in var(--dur-base) var(--ease-out);
   }
+  @keyframes drop-in { from { opacity: 0; } }
   .band {
     position: absolute;
-    border: 1px dashed var(--fg);
-    background: color-mix(in srgb, var(--fg) 12%, transparent);
+    left: 0;
+    top: 0;
+    border: 1px solid color-mix(in srgb, var(--fg) 70%, transparent);
+    border-radius: var(--r-xs);
+    background: color-mix(in srgb, var(--fg) 9%, transparent);
     pointer-events: none;
     z-index: 2;
-  }
-  .ghost {
-    position: fixed;
-    z-index: 50;
-    padding: 2px 8px;
-    border-radius: var(--radius);
-    background: var(--accent);
-    color: var(--accent-fg);
-    font-size: 12px;
-    pointer-events: none;
+    animation: kf-fade var(--dur-fast) var(--ease-out);
   }
 </style>

@@ -12,7 +12,9 @@
 <script lang="ts">
   // 정리 모드 왼쪽 파일 목록. 파일마다 이름·쪽 수·변경됨 점·파일별 선택 쪽 수·닫기 버튼.
   // 쪽을 끌어 오면(dragging) 활성이 아닌 파일 항목과 맨 아래 '새 파일' 칸이 놓을 수 있는 대상으로 강조된다.
-  import { tick } from 'svelte';
+  import { onMount, tick } from 'svelte';
+  import { flip } from 'svelte/animate';
+  import { popIn, popOut, reduced, slideDownIn, slideUpOut, solveSpring, SPRING } from './motion';
   import CloseConfirm from './CloseConfirm.svelte';
   import type { TabNotice } from './status';
   import Icon from './ui/Icon.svelte';
@@ -56,6 +58,49 @@
   } = $props();
 
   let moreOpen = $state(false);
+  let listEl: HTMLDivElement | undefined = $state();
+  /** 활성 항목 표시: 항목 사이를 스프링으로 미끄러진다 */
+  let ink = $state<{ y: number; h: number } | null>(null);
+  let inkReady = $state(false);
+  const flipSpring = solveSpring(SPRING.glide);
+  function measureInk() {
+    const el = activeKey != null ? listEl?.querySelector<HTMLElement>(`[data-file-key="${activeKey}"]`) : null;
+    if (!el || !listEl) {
+      ink = null;
+      return;
+    }
+    const y = el.getBoundingClientRect().top - listEl.getBoundingClientRect().top + listEl.scrollTop;
+    const h = el.offsetHeight;
+    if (!ink || Math.abs(ink.y - y) > 0.5 || ink.h !== h) ink = { y, h };
+  }
+  let trackRaf = 0;
+  let trackUntil = 0;
+  function track(ms = 600) {
+    trackUntil = performance.now() + ms;
+    if (trackRaf) return;
+    const loop = () => {
+      measureInk();
+      trackRaf = performance.now() < trackUntil ? requestAnimationFrame(loop) : 0;
+    };
+    trackRaf = requestAnimationFrame(loop);
+  }
+  $effect(() => {
+    void activeKey;
+    void files.length;
+    void confirm;
+    void notice;
+    void tick().then(() => {
+      measureInk();
+      track();
+    });
+  });
+  onMount(() => {
+    const t = setTimeout(() => (inkReady = true), 60);
+    return () => {
+      clearTimeout(t);
+      cancelAnimationFrame(trackRaf);
+    };
+  });
   const confirmFile = $derived(confirm ? files.find((f) => f.key === confirm.key) : undefined);
 
   async function onKey(e: KeyboardEvent) {
@@ -109,7 +154,7 @@
       <div class="more">
         <IconButton icon="chevron-down" label="선택한 쪽 모두 보내기 방식" haspopup expanded={moreOpen} disabled={busy || selTotal === 0} onclick={() => (moreOpen = !moreOpen)} />
         {#if moreOpen}
-          <div class="mini" role="menu" tabindex="-1" onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), (moreOpen = false))}>
+          <div class="mini stagger" role="menu" tabindex="-1" in:popIn|global={{ origin: 'top right' }} out:popOut|global={{ origin: 'top right' }} onkeydown={(e) => e.key === 'Escape' && (e.stopPropagation(), (moreOpen = false))}>
             <button type="button" role="menuitem" onclick={() => { moreOpen = false; onsendall('copy'); }}>복사 → 새 파일</button>
             <button type="button" role="menuitem" title="원본 파일들에서 지우고 새 파일로 옮깁니다. 되돌리기는 함께 적용됩니다" onclick={() => { moreOpen = false; onsendall('move'); }} data-testid="send-all-move">이동 → 새 파일</button>
           </div>
@@ -118,9 +163,11 @@
     </div>
   </div>
 
-  <div class="list" role="listbox" tabindex="-1" aria-label="열린 파일" onkeydown={onKey} data-testid="file-list">
+  <div class="list" bind:this={listEl} role="listbox" tabindex="-1" aria-label="열린 파일" onkeydown={onKey} data-testid="file-list">
+    {#if ink}<span class="ink" class:ready={inkReady} style:transform="translateY({ink.y}px)" style:height="{ink.h}px" aria-hidden="true"></span>{/if}
     {#each files as f (f.key)}
       {@const isSelf = f.key === activeKey}
+      <div class="entry" animate:flip={{ duration: reduced() ? 0 : flipSpring.duration, easing: flipSpring.fn }} in:slideDownIn={{ h: 64 }} out:slideUpOut={{ h: 64 }}>
       <div
         class="row"
         class:active={isSelf}
@@ -170,6 +217,7 @@
           <Notice kind={notice.kind} text={notice.text} reassure={notice.reassure} detail={notice.detail} onclose={onclosenotice} />
         </div>
       {/if}
+      </div>
     {/each}
   </div>
 
@@ -214,20 +262,33 @@
     padding: 4px;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: 0 4px 16px rgb(0 0 0 / 0.16);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-2), var(--edge);
   }
-  .mini button { border: 0; text-align: left; background: transparent; }
+  .mini button { border: 0; text-align: left; background: transparent; box-shadow: none; }
   .mini button:hover { background: var(--hover); }
-  .list { flex: 1; min-height: 0; overflow-y: auto; padding: 6px; display: grid; gap: 2px; align-content: start; }
+  .list { position: relative; flex: 1; min-height: 0; overflow-y: auto; padding: 6px; display: grid; gap: 2px; align-content: start; }
+  .ink {
+    position: absolute;
+    left: 6px;
+    right: 6px;
+    top: 0;
+    border-radius: var(--r-md);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-1);
+    pointer-events: none;
+  }
+  .ink.ready { transition: transform var(--spring-glide-dur) var(--spring-glide), height var(--spring-glide-dur) var(--spring-glide); }
   .row {
+    position: relative;
     display: flex;
     align-items: center;
     border: 1px solid transparent;
-    border-radius: var(--radius);
+    border-radius: var(--r-md);
+    transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), opacity var(--dur-base) var(--ease-out);
   }
-  .row:hover { background: var(--hover); }
-  .row.active { background: var(--surface); border-color: var(--fg-muted); }
+  .row:hover:not(.active):not(.over) { background: var(--hover); }
   .row.droppable { border: 1px dashed var(--fg-muted); }
   .row.over { background: var(--accent); color: var(--accent-fg); border: 1px solid var(--accent); }
   .row.disabled { opacity: 0.45; }
@@ -271,14 +332,19 @@
     margin-right: 4px;
     padding: 0;
     border: 0;
-    border-radius: 6px;
+    border-radius: var(--r-sm);
     background: transparent;
+    box-shadow: none;
     color: inherit;
+    opacity: 0.55;
   }
+  .row:hover .x, .row:focus-within .x, .row.active .x { opacity: 0.9; }
+  .x:hover:not(:disabled) { opacity: 1; background: var(--press); }
   @media (pointer: coarse) {
     .x { width: 36px; height: 36px; min-width: 36px; min-height: 36px; }
   }
   .pad { padding: 2px 2px 6px; }
+  .entry { position: relative; }
   .newslot {
     flex: none;
     display: flex;
@@ -288,9 +354,10 @@
     margin: 6px 8px 8px;
     min-height: 56px;
     border: 1px dashed var(--border);
-    border-radius: var(--radius);
+    border-radius: var(--r-md);
     color: var(--fg-muted);
+    transition: background-color var(--dur-base) var(--ease-out), color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), transform var(--spring-pop-dur) var(--spring-pop);
   }
   .newslot.droppable { border-color: var(--fg-muted); color: var(--fg); }
-  .newslot.over { background: var(--accent); color: var(--accent-fg); border: 1px solid var(--accent); }
+  .newslot.over { background: var(--accent); color: var(--accent-fg); border: 1px solid var(--accent); transform: scale(1.03); }
 </style>

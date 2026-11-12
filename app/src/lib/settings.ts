@@ -26,7 +26,7 @@ export interface Settings {
 export const ZOOM_MIN = 0.25;
 export const ZOOM_MAX = 4;
 export const GRID_MIN = 80;
-export const GRID_MAX = 320;
+export const GRID_MAX = 640;
 export const SIDE_MIN = 100;
 export const SIDE_MAX = 280;
 

@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { popIn, popOut } from './motion';
+  import Progress from './ui/Progress.svelte';
   // 인쇄 대화상자(툴바 인쇄 버튼에 붙는 팝오버): 대상 요약, 범위(전체·선택한 쪽·현재 쪽·범위 입력), 방식(자동·이미지), 이미지 해상도.
   // 실행 중 진행률과 취소, 방식 전환 안내·실패 안내도 이 안에 보인다. 인쇄 창이 뜨면 닫힌다.
   import { onMount, untrack } from 'svelte';
@@ -68,8 +70,10 @@
 </script>
 
 <div
-  class="pop"
+  class="pop stagger"
   bind:this={pop}
+  in:popIn|global={{ origin: 'top right' }}
+  out:popOut|global={{ origin: 'top right' }}
   role="dialog"
   aria-label="인쇄"
   data-testid="print-pop"
@@ -144,6 +148,7 @@
   {#if job.note}<Notice kind={job.note.kind} text={job.note.text} detail={job.note.detail} onclose={() => (job.note = null)} />{/if}
   {#if job.error}<Notice kind="error" text={job.error.text} reassure={job.error.reassure} detail={job.error.detail} onclose={() => (job.error = null)} />{/if}
 
+  {#if running}<Progress value={job.phase === 'render' && job.total ? job.done / job.total : null} label="인쇄 준비 진행률" />{/if}
   <div class="btns">
     {#if running}
       <span class="prog" role="status" data-testid="print-progress">{progress}</span>
@@ -167,8 +172,8 @@
     padding: 10px;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: 0 4px 16px rgb(0 0 0 / 0.16);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-2), var(--edge);
     outline: none;
   }
   .head { margin: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -176,13 +181,9 @@
   fieldset:disabled { opacity: 0.55; }
   legend { padding: 0; margin-bottom: 2px; font-size: 12px; color: var(--fg-muted); font-weight: 600; }
   .opt { display: flex; align-items: center; gap: 8px; min-height: 32px; cursor: pointer; min-width: 0; }
-  .opt input[type='radio'] { min-height: 0; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); flex: none; }
+
   .field { flex: 1; min-width: 0; }
-  .seg { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
-  .seg label { position: relative; display: grid; place-items: center; min-height: 32px; cursor: pointer; font-variant-numeric: tabular-nums; }
-  .seg label.on { background: var(--accent); color: var(--accent-fg); }
-  .seg input { position: absolute; opacity: 0; pointer-events: none; }
-  .seg label:has(input:focus-visible) { outline: 2px solid var(--fg); outline-offset: -2px; }
+  .seg label { font-variant-numeric: tabular-nums; }
   .hint { margin: 0; font-size: 12px; color: var(--fg-muted); line-height: 1.5; word-break: keep-all; }
   .err { margin: 0; font-size: 13px; color: var(--danger); line-height: 1.5; word-break: keep-all; }
   .btns { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }

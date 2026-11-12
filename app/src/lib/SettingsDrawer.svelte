@@ -1,6 +1,7 @@
 <script lang="ts">
   // 오른쪽 서랍: 가끔 쓰는 설정과 단축키 안내.
   import { onMount } from 'svelte';
+  import { drawerIn, drawerOut, rangeFill } from './motion';
   import { GRID_MAX, GRID_MIN, SIDE_MAX, SIDE_MIN, type Settings } from './settings';
   import IconButton from './ui/IconButton.svelte';
   import { ZOOM_PRESETS } from './zoom';
@@ -59,7 +60,7 @@
   ];
 </script>
 
-<div class="drawer" bind:this={panel} tabindex="-1" role="dialog" aria-label="설정" onkeydown={(e) => e.key === 'Escape' && onclose()}>
+<div class="drawer" bind:this={panel} tabindex="-1" role="dialog" aria-label="설정" onkeydown={(e) => e.key === 'Escape' && onclose()} in:drawerIn|global out:drawerOut|global>
   <header>
     <h2>설정</h2>
     <IconButton icon="close" label="설정 닫기" onclick={onclose} />
@@ -85,12 +86,12 @@
 
   <div class="field">
     <label for="set-grid">정리 모드 썸네일 크기 <span class="val">{settings.gridThumb}px</span></label>
-    <input id="set-grid" type="range" min={GRID_MIN} max={GRID_MAX} step="4" value={settings.gridThumb} oninput={(e) => onchange({ gridThumb: Number(e.currentTarget.value) })} data-testid="set-grid" />
+    <input id="set-grid" type="range" use:rangeFill={settings.gridThumb} min={GRID_MIN} max={GRID_MAX} step="4" value={settings.gridThumb} oninput={(e) => onchange({ gridThumb: Number(e.currentTarget.value) })} data-testid="set-grid" />
   </div>
 
   <div class="field">
     <label for="set-side">보기 모드 썸네일 패널 폭 <span class="val">{settings.sideWidth}px</span></label>
-    <input id="set-side" type="range" min={SIDE_MIN} max={SIDE_MAX} step="4" value={settings.sideWidth} oninput={(e) => onchange({ sideWidth: Number(e.currentTarget.value) })} data-testid="set-side" />
+    <input id="set-side" type="range" use:rangeFill={settings.sideWidth} min={SIDE_MIN} max={SIDE_MAX} step="4" value={settings.sideWidth} oninput={(e) => onchange({ sideWidth: Number(e.currentTarget.value) })} data-testid="set-side" />
   </div>
 
   <div class="field">
@@ -121,19 +122,12 @@
     bottom: 0;
     width: min(320px, 100%);
     z-index: 20;
-    padding: 8px 16px 16px;
+    padding: 8px 16px 20px;
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-top: 0;
-    border-bottom: 0;
-    box-shadow: -8px 0 24px rgb(0 0 0 / 0.12);
+    border-left: 1px solid var(--border);
+    box-shadow: var(--shadow-drawer);
     overflow-y: auto;
     outline: none;
-    animation: slide 0.14s ease-out;
-  }
-  @keyframes slide {
-    from { transform: translateX(24px); opacity: 0; }
-    to { transform: none; opacity: 1; }
   }
   header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
   h2 { font-size: 15px; margin: 0; }
@@ -141,10 +135,17 @@
   .field { display: grid; gap: 6px; margin-top: 14px; }
   label { font-size: 13px; color: var(--fg-muted); }
   select { width: 100%; }
-  input[type='range'] { width: 100%; min-height: 28px; padding: 0; border: 0; background: transparent; accent-color: var(--accent); }
+  input[type='range'] { width: 100%; }
   .val { margin-left: 6px; font-variant-numeric: tabular-nums; }
   .hint { margin: 0; font-size: 12px; color: var(--fg-muted); }
   dl { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; margin: 0; align-items: center; }
+  .field, section { animation: var(--kf-rise) var(--dur-slow) var(--ease-out) backwards; }
+  .field:nth-of-type(1) { animation-delay: 90ms; }
+  .field:nth-of-type(2) { animation-delay: 120ms; }
+  .field:nth-of-type(3) { animation-delay: 150ms; }
+  .field:nth-of-type(4) { animation-delay: 180ms; }
+  .field:nth-of-type(5) { animation-delay: 210ms; }
+  section { animation-delay: 250ms; }
   dt { display: flex; gap: 4px; }
   dd { margin: 0; }
 </style>

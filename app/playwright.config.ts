@@ -20,6 +20,8 @@ export default defineConfig({
     channel,
     headless: true,
     viewport: { width: 1400, height: 900 },
+    // 모션 때문에 e2e 가 흔들리지 않게 기본은 모션 줄이기(이동·크기 연출 없음). 모션 자체는 motion.spec.ts 가 따로 켠다
+    reducedMotion: 'reduce',
     acceptDownloads: true,
     actionTimeout: 15_000,
     trace: 'retain-on-failure',

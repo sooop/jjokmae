@@ -4,6 +4,12 @@ import { FIVE, inspect } from './fixtures/synth.ts';
 
 const ABC = [G.docA, G.docB, G.docC];
 
+/** 탭(파일)을 닫는다. 저장 안 한 변경이 있으면 버리고 닫는다 */
+async function closeDoc(app: { page: import('@playwright/test').Page }, name: string) {
+  await app.page.getByRole('button', { name: `${name} 닫기` }).click();
+  await app.page.getByTestId('close-discard').click({ timeout: 1500 }).catch(() => {});
+}
+
 test.describe('다중 문서: 탭', () => {
   test('탭마다 현재 쪽·확대·선택·스크롤을 따로 보관하고 전환하면 복원한다', async ({ app, page }) => {
     await app.goto();
@@ -165,11 +171,13 @@ test.describe('다중 문서: 보내기', () => {
     expect(await app.pageCounts()).toEqual([4, 1]);
     await app.undo(); // 새 탭이 활성인 채로 되돌려도 같다
     expect(await app.tabNames()).toEqual(['docA.pdf']);
-    // 복사로 만든 새 파일을 되돌려도 탭이 닫힌다
+    // 복사로 만든 새 파일은 되돌려도 탭이 닫히지 않는다(다시하기로 되살릴 곳이 없어 내용을 잃기 때문)
     await app.clickThumb(0);
     await app.send({ target: 'new' });
-    await app.undo();
-    expect(await app.tabNames()).toEqual(['docA.pdf']);
+    await app.page.keyboard.press('Control+z');
+    await expect(app.tabNotice()).toContainText('만든 시점');
+    expect(await app.tabNames()).toHaveLength(2);
+    expect(await app.pageCounts()).toEqual([5, 1]);
   });
 });
 
@@ -213,7 +221,7 @@ test.describe('다중 문서: 탭으로 끌어 복사', () => {
 });
 
 test.describe('다중 문서: 열린 파일 병합', () => {
-  test('체크·순서를 정해 새 탭으로 합치고, 원본 탭은 그대로이며, 병합 탭을 되돌리면 닫힌다', async ({ app, page }) => {
+  test('체크·순서를 정해 새 탭으로 합치고, 원본 탭은 그대로이며, 병합 탭은 되돌리기로 닫히지 않는다', async ({ app, page }) => {
     await app.goto();
     await app.open([SAMPLES.koEmbedded, SAMPLES.koNonEmbedded, SAMPLES.scan]);
     const counts = (await app.summary()).docs.map((d) => d.pages);
@@ -236,8 +244,12 @@ test.describe('다중 문서: 열린 파일 병합', () => {
     expect(sv.info.map((p) => kind(p.text)).join('')).toBe('E'.repeat(counts[0]) + 'S'.repeat(counts[2]) + 'N'.repeat(counts[1]));
     await expect(app.tab('ko_embedded-병합.pdf').getByTestId('tab-dirty')).toHaveCount(0); // 저장하면 점이 사라진다
 
-    // 병합 탭에서 되돌리면 새 탭이 닫히고 원본은 그대로
-    await app.undo();
+    // 병합 탭은 되돌려도 닫히지 않는다. 직접 닫으면 원본은 그대로
+    await app.page.keyboard.press('Control+z');
+    await expect(app.tabNotice()).toContainText('만든 시점');
+    expect(await app.tabNames()).toHaveLength(4);
+    await closeDoc(app, 'ko_embedded-병합.pdf');
+    await expect.poll(() => app.tabNames()).toHaveLength(3);
     expect(await app.tabNames()).toEqual(['ko_embedded.pdf', 'ko_nonembedded.pdf', 'scan.pdf']);
 
     // 체크를 끄면 제외된다. 이미 열린 five 를 끝에 두고 합친다

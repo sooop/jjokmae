@@ -386,6 +386,7 @@
             <div
               class="hit hl"
               class:selected
+              data-selected={selected ? 'true' : 'false'}
               style={rectStyle(r)}
               data-annot-hit
               data-annot-id={a.id}
@@ -401,6 +402,7 @@
           <div
             class="hit"
             class:selected
+            data-selected={selected ? 'true' : 'false'}
             style={rectStyle(r)}
             data-annot-hit
             data-annot-id={a.id}
@@ -500,7 +502,9 @@
     outline: 2px solid #171717;
     box-shadow: 0 0 0 1px #fff;
     cursor: move;
+    animation: sel-in var(--spring-bouncy-dur) var(--spring-bouncy);
   }
+  @keyframes sel-in { from { outline-offset: 5px; outline-color: transparent; } }
   .hit.hl.selected { outline-offset: 0; }
   .handle {
     position: absolute;
@@ -510,6 +514,7 @@
     display: grid;
     place-items: center;
     touch-action: none;
+    animation: var(--kf-pop) var(--spring-bouncy-dur) var(--spring-bouncy) 60ms backwards;
   }
   .handle::before {
     content: '';

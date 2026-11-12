@@ -175,7 +175,7 @@
     <span class="spacer"></span>
 
     {#if formCount > 0}
-      <span class="form-chip" title="양식이 있는 문서입니다. 칸을 눌러 입력하고 Tab 으로 다음 칸으로 갑니다.">
+      <span class="form-chip" data-testid="form-chip" title="양식이 있는 문서입니다. 칸을 눌러 입력하고 Tab 으로 다음 칸으로 갑니다.">
         <Icon name="form" size={14} />
         <span>양식 {formCount}</span>
       </span>

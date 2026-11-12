@@ -13,7 +13,8 @@
 <script lang="ts">
   // 앵커 팝오버 메뉴. 화면 가장자리에 맞춰 위치를 보정하고, Esc·바깥 누르기로 닫고, 방향키로 이동한다.
   // 하위 목록은 같은 자리에서 목록을 갈아 끼우는 방식(맨 위 '뒤로' 항목, ← / Backspace)이라 터치·키보드에서도 같다.
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
+  import { popIn, popOut } from './motion';
   import Icon from './ui/Icon.svelte';
 
   let {
@@ -35,7 +36,9 @@
   /** 들어와 있는 하위 목록 경로(항목 id) */
   let path = $state<string[]>([]);
   let root: HTMLDivElement | undefined = $state();
-  let pos = $state({ left: -9999, top: -9999 });
+  let pos = $state(untrack(() => ({ left: x, top: y })));
+  /** 움직이는 강조 띠: 활성 항목 자리로 스프링으로 미끄러진다 */
+  let hl = $state<{ y: number; h: number } | null>(null);
   let active = $state(0);
 
   const levels = $derived.by(() => {
@@ -76,7 +79,15 @@
 
   async function focusActive() {
     await tick();
-    root?.querySelectorAll<HTMLElement>('[role=menuitem]')[active]?.focus();
+    const el = root?.querySelectorAll<HTMLElement>('[role=menuitem]')[active];
+    // 포커스는 항상 메뉴 안으로: 항목이 아직 없으면 메뉴 자신이 받아 Esc 가 닫게 한다
+    (el ?? root)?.focus({ preventScroll: true });
+  }
+
+  async function moveHl() {
+    await tick();
+    const el = root?.querySelectorAll<HTMLElement>('[role=menuitem]')[active];
+    hl = el && !rows[active]?.disabled ? { y: el.offsetTop, h: el.offsetHeight } : null;
   }
 
   $effect(() => {
@@ -84,6 +95,11 @@
     active = firstEnabled(0);
     void place();
     void focusActive();
+  });
+  $effect(() => {
+    void active;
+    void rows;
+    void moveHl();
   });
 
   function choose(i: number) {
@@ -126,11 +142,28 @@
       if (root && !root.contains(e.target as Node)) onclose();
     };
     const gone = () => onclose();
+    // 터치 길게 누르기로 열면 손을 뗄 때 포커스가 원래 칸으로 돌아갈 수 있다. 메뉴가 열려 있는 동안은 Esc 를 항상 메뉴가 받는다
+    const winKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation();
+        e.preventDefault();
+        onclose();
+        return;
+      }
+      if (root && !root.contains(document.activeElement) && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) void focusActive();
+    };
     window.addEventListener('pointerdown', down, true);
+    window.addEventListener('keydown', winKey, true);
     window.addEventListener('resize', gone);
+    void focusActive();
+    const t = window.setTimeout(() => {
+      if (root && !root.contains(document.activeElement)) void focusActive();
+    }, 350);
     return () => {
+      clearTimeout(t);
       window.removeEventListener('pointerdown', down, true);
-        window.removeEventListener('resize', gone);
+      window.removeEventListener('keydown', winKey, true);
+      window.removeEventListener('resize', gone);
     };
   });
 </script>
@@ -146,7 +179,10 @@
   onkeydown={onKey}
   oncontextmenu={(e) => e.preventDefault()}
   data-testid="context-menu"
+  in:popIn|global={{ origin: 'top left', from: 0.88, y: -4 }}
+  out:popOut|global={{ origin: 'top left' }}
 >
+  {#if hl}<span class="hl" style:transform="translateY({hl.y}px)" style:height="{hl.h}px" aria-hidden="true"></span>{/if}
   {#each rows as r, i (r.id)}
     <button
       type="button"
@@ -156,6 +192,7 @@
       disabled={r.disabled}
       aria-haspopup={r.sub ? 'menu' : undefined}
       tabindex={i === active ? 0 : -1}
+      style:--i={i}
       title={r.title}
       data-menu-id={r.id}
       onclick={() => choose(i)}
@@ -180,11 +217,23 @@
     padding: 4px;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: 0 4px 16px rgb(0 0 0 / 0.2);
+    border-radius: var(--r-lg);
+    box-shadow: var(--shadow-3), var(--edge);
     outline: none;
   }
+  .hl {
+    position: absolute;
+    left: 4px;
+    right: 4px;
+    top: 0;
+    border-radius: var(--r-sm);
+    background: var(--hover);
+    pointer-events: none;
+    transition: transform var(--spring-pop-dur) var(--spring-pop), height var(--dur-fast) var(--ease-out);
+    animation: kf-fade var(--dur-fast) var(--ease-out);
+  }
   .item {
+    position: relative;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -192,15 +241,19 @@
     min-height: 32px;
     padding: 4px 10px;
     border: 0;
-    border-radius: 6px;
+    border-radius: var(--r-sm);
     background: transparent;
+    box-shadow: none;
     text-align: left;
+    animation: var(--kf-rise) var(--dur-slow) var(--ease-out) backwards;
+    animation-delay: calc(min(var(--i, 0), 9) * 20ms + 30ms);
   }
+  .item:active:not(:disabled) { transform: scale(0.98); background: transparent; }
   @media (pointer: coarse) {
     .item { min-height: 40px; }
   }
-  .item:focus-visible { outline: 2px solid var(--fg); outline-offset: -2px; background: var(--hover); }
-  .item:hover:not(:disabled) { background: var(--hover); }
+  .item:focus-visible { outline: 2px solid var(--fg); outline-offset: -2px; }
+  .item:hover:not(:disabled) { background: transparent; border-color: transparent; }
   .back { color: var(--fg-muted); font-weight: 600; }
   .lb { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

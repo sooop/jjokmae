@@ -6,6 +6,8 @@
   import FileList from './FileList.svelte';
   import PageGrid, { type CtxRequest, type DropTarget } from './PageGrid.svelte';
   import PageTools from './PageTools.svelte';
+  import * as pa from './page-actions';
+  import type { ScreenRect } from './motion/drag-ghost';
   import SendPopover from './SendPopover.svelte';
   import type { PrintScope } from './print';
   import { GRID_MAX, GRID_MIN } from './settings';
@@ -127,14 +129,14 @@
         return;
       }
       closeMenu();
-      if (kind === 'new') void ws.send({ from: d, pages, mode, target: { type: 'new' } });
-      else void ws.send({ from: d, pages, mode, target: { type: 'doc', key: Number(key), pos: 'end' } });
+      if (kind === 'new') void pa.send(ws, { from: d, pages, mode, target: { type: 'new' } });
+      else void pa.send(ws, { from: d, pages, mode, target: { type: 'doc', key: Number(key), pos: 'end' } });
       return;
     }
     closeMenu();
-    if (id === 'dup') ws.duplicate(pages);
-    else if (id === 'rot') ws.rotate(pages);
-    else if (id === 'del') ws.remove(pages);
+    if (id === 'dup') pa.duplicate(ws, pages);
+    else if (id === 'rot') pa.rotate(ws, pages);
+    else if (id === 'del') pa.remove(ws, pages);
     else if (id === 'extract') void ws.extract(pages);
     else if (id === 'split') onsplit();
     else if (id === 'print') {
@@ -194,13 +196,13 @@
     if (!m || m.kind !== 'send') return;
     const d = ws.docOf(m.fromKey);
     closeMenu();
-    if (d) void ws.send({ from: d, pages: m.pages, mode, target });
+    if (d) void pa.send(ws, { from: d, pages: m.pages, mode, target });
   }
 
-  function onTabDrop(moving: number[], target: DropTarget) {
+  function onTabDrop(moving: number[], target: DropTarget, rects?: ScreenRect[]) {
     const d = doc;
     if (!d) return;
-    void ws.send({ from: d, pages: moving, mode: 'copy', target: target === 'new' ? { type: 'new' } : { type: 'doc', key: target, pos: 'end' } });
+    void pa.send(ws, { from: d, pages: moving, mode: 'copy', target: target === 'new' ? { type: 'new' } : { type: 'doc', key: target, pos: 'end' } }, rects);
   }
 
   const sel = $derived(doc?.selected ?? []);
@@ -233,9 +235,9 @@
           count={sel.length}
           busy={ws.opBusy}
           notice={ws.pagesNotice}
-          onrotate={() => ws.rotate(sel)}
-          oncopy={() => ws.duplicate(sel)}
-          ondelete={() => ws.remove(sel)}
+          onrotate={() => pa.rotate(ws, sel)}
+          oncopy={() => pa.duplicate(ws, sel)}
+          ondelete={() => pa.remove(ws, sel)}
           onextract={() => void ws.extract(sel)}
           onprint={() => onprint('selected')}
           onclear={() => doc && (doc.selected = [])}
@@ -277,12 +279,12 @@
               d.selected = s;
               d.anchor = a;
             }}
-            onreorder={(m, b) => ws.reorder(m, b)}
+            onreorder={(m, b, s) => pa.reorder(ws, m, b, s)}
             ontabdrop={onTabDrop}
             ondragtab={(s) => (dragTab = s)}
             onopen={(i) => ws.openPage(i)}
             oncontext={onCtx}
-            onremove={(p) => ws.remove(p)}
+            onremove={(p) => pa.remove(ws, p)}
           />
         {/each}
       {/if}
@@ -309,7 +311,7 @@
 {/if}
 
 <style>
-  .org { flex: 1; min-width: 0; display: flex; min-height: 0; }
+  .org { flex: 1; min-width: 0; display: flex; min-height: 0; animation: kf-fade var(--dur-base) var(--ease-out); }
   .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   .bar {
     flex: none;

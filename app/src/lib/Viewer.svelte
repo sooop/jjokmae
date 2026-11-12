@@ -3,6 +3,7 @@
   // 화면에서 멀어진 쪽은 PageCanvas 가 요청을 취소하고 캔버스 크기를 0 으로 만들어 비트맵을 버린다.
   import { onMount, untrack, type Snippet } from 'svelte';
   import type { PageSize } from '../engine/adapter';
+  import { animate, reduced } from './motion';
   import PageCanvas from './PageCanvas.svelte';
   import type { RenderScheduler } from './render-queue';
   import { computeLayout, indexAt } from './virtual';
@@ -10,6 +11,7 @@
   let {
     sizes,
     zoom,
+    liveZoom,
     scheduler,
     current = $bindable(0),
     initialPage = 0,
@@ -19,7 +21,10 @@
     ondraw,
   }: {
     sizes: PageSize[];
+    /** 배치·해상도를 정하는 확정 배율 */
     zoom: number;
+    /** 슬라이더를 끄는 동안의 화면 배율: 배치는 그대로 두고 CSS 변환으로만 즉시 따라간다(멈추면 zoom 이 따라와 다시 그린다) */
+    liveZoom?: number;
     scheduler: RenderScheduler;
     current?: number;
     initialPage?: number;
@@ -47,9 +52,59 @@
   const WINDOW_BUDGET_PX = 48_000_000;
 
   let scroller: HTMLDivElement;
+  let contentEl: HTMLDivElement;
+  /** 지금 화면에 보이는 실제 배율(확정 배율 × 변환) */
+  let shownZoom = untrack(() => zoom);
+  let zoomAnim: Animation | null = null;
+  const centerOrigin = () => `${scroller.scrollLeft + scroller.clientWidth / 2}px ${scroller.scrollTop + scroller.clientHeight / 2}px`;
+
+  // 끄는 동안: CSS 변환으로 즉시 반응한다(화면 가운데 지점을 기준으로)
+  $effect(() => {
+    const lz = liveZoom ?? zoom;
+    const z = zoom;
+    untrack(() => {
+      if (!contentEl || !scroller) return;
+      if (Math.abs(lz - z) < 1e-4) {
+        if (!zoomAnim) contentEl.style.transform = '';
+        return;
+      }
+      zoomAnim?.cancel();
+      zoomAnim = null;
+      if (!contentEl.style.transform) contentEl.style.transformOrigin = centerOrigin();
+      contentEl.style.transform = `scale(${lz / z})`;
+      shownZoom = lz;
+    });
+  });
+
+  /** 확정 배율이 바뀐 직후: 보이던 배율에서 새 배치로 스프링으로 이어 준다 */
+  function glideZoom(z: number) {
+    const from = shownZoom / z;
+    shownZoom = z;
+    if (!contentEl) return;
+    zoomAnim?.cancel();
+    zoomAnim = null;
+    contentEl.style.transform = '';
+    if (reduced() || Math.abs(from - 1) < 0.003) return;
+    contentEl.style.transformOrigin = centerOrigin();
+    const a = animate(contentEl, [{ transform: `scale(${from})` }, { transform: 'scale(1)' }], { spring: 'heavy', fill: 'none' });
+    zoomAnim = a;
+    if (a) a.onfinish = a.oncancel = () => { if (zoomAnim === a) zoomAnim = null; };
+  }
   let dpr = $state(typeof devicePixelRatio === 'number' ? devicePixelRatio : 1);
   let winA = $state(0);
   let winB = $state(-1);
+  /** 비트맵이 그려진 쪽(창 밖으로 나가면 지운다). 그려지기 전의 자리표시 배경에 쓴다 */
+  let drawnPages = $state<Record<number, boolean>>({});
+  $effect(() => {
+    const a = winA;
+    const b = winB;
+    untrack(() => {
+      for (const k of Object.keys(drawnPages)) {
+        const i = Number(k);
+        if (i < a || i > b) delete drawnPages[i];
+      }
+    });
+  });
 
   const cssScale = $derived(zoom * CSS_PER_PT);
   const widths = $derived(sizes.map((s) => s.width * cssScale));
@@ -104,7 +159,14 @@
     if (b !== winB) winB = b;
   }
 
+  let scrollIdle = 0;
   function onScroll() {
+    const el = scroller;
+    if (el) {
+      el.dataset.scrolling = '';
+      clearTimeout(scrollIdle);
+      scrollIdle = window.setTimeout(() => delete el.dataset.scrolling, 160);
+    }
     if (!raf) {
       raf = requestAnimationFrame(() => {
         raf = 0;
@@ -153,6 +215,7 @@
       const y = lay.tops[a.page] + a.frac * hs[a.page];
       scroller.scrollTop = Math.max(0, y - scroller.clientHeight / 2);
       scroller.scrollLeft = Math.max(0, a.xRatio * scroller.scrollWidth - scroller.clientWidth / 2);
+      glideZoom(z);
     }
     snap = { zoom: z, tops: lay.tops, heights: hs };
     untrack(update);
@@ -181,11 +244,12 @@
 </script>
 
 <div class="scroller" bind:this={scroller} onscroll={onScroll} data-testid="scroller">
-  <div class="content" style:height="{layout.total}px" style:min-width="{maxW + PAD * 2}px">
+  <div class="content" bind:this={contentEl} style:height="{layout.total}px" style:min-width="{maxW + PAD * 2}px">
     {#each sizes as _, i (i)}
       <div
         class="slot"
         data-page={i}
+        class:blank={i >= winA && i <= winB && !drawnPages[i]}
         data-win={i >= winA && i <= winB ? '' : undefined}
         style:top="{layout.tops[i]}px"
         style:width="{widths[i]}px"
@@ -199,7 +263,10 @@
           {scheduler}
           priority={() => Math.abs(i - current)}
           rev={rev[i] ?? 0}
-          ondraw={(r) => ondraw?.(i, r)}
+          ondraw={(r) => {
+            drawnPages[i] = true;
+            ondraw?.(i, r);
+          }}
         />
         {@render overlay?.(i, i >= winA && i <= winB)}
       </div>
@@ -218,10 +285,14 @@
     position: relative;
     width: 100%;
   }
+  .content { will-change: auto; }
   .slot {
     position: absolute;
     left: 50%;
     background: var(--page-bg);
     box-shadow: var(--page-shadow);
   }
+  /* 아직 그려지지 않은 쪽은 정적인 자리표시(그려지면 캔버스가 부드럽게 나타난다) */
+  .slot.blank { background: color-mix(in srgb, var(--page-bg) 95%, var(--fg)); }
+  @media print { .slot { background: #fff !important; } }
 </style>

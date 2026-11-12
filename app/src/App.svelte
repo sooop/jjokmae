@@ -1,5 +1,8 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
+  import { popIn, popOut, rangeFill, reduced, scrimFade } from './lib/motion';
+  import { noteState } from './lib/motion/page-flip';
+  import { captureThumbs, landThumbs } from './lib/motion/mode-flip';
   import type { Annotation, FormField, NewAnnotation, PagePoint, Rect } from './engine/adapter';
   import AnnotToolbar from './lib/AnnotToolbar.svelte';
   import { hasHangul, type Tool } from './lib/annot-geom';
@@ -9,6 +12,8 @@
   import Organize from './lib/Organize.svelte';
   import PageOverlay from './lib/PageOverlay.svelte';
   import PageTools from './lib/PageTools.svelte';
+  import * as pa from './lib/page-actions';
+  import type { ScreenRect } from './lib/motion/drag-ghost';
   import { PrintJob } from './lib/print-job.svelte';
   import { defaultScope, type PrintScope } from './lib/print';
   import PrintPopover from './lib/PrintPopover.svelte';
@@ -25,11 +30,13 @@
   import TabBar from './lib/TabBar.svelte';
   import Thumbnails from './lib/Thumbnails.svelte';
   import type { SendPos } from './lib/transfer';
+  import Icon from './lib/ui/Icon.svelte';
   import IconButton from './lib/ui/IconButton.svelte';
   import Notice from './lib/ui/Notice.svelte';
   import Viewer from './lib/Viewer.svelte';
   import { Workspace } from './lib/workspace.svelte';
   import { stepZoom, ZOOM_PRESETS } from './lib/zoom';
+  import { sliderToZoom, ZOOM_SLIDER_MAX, zoomToSlider } from './lib/zoom-scale';
 
   let settings = $state<Settings>(loadSettings());
   let drawerOpen = $state(false);
@@ -91,7 +98,50 @@
   const current = $derived(doc?.current ?? 0);
   const selected = $derived(doc?.selected ?? []);
   const curZoom = $derived(doc?.zoom ?? settings.zoom);
-  const zoomOptions = $derived(ZOOM_PRESETS.includes(curZoom) ? ZOOM_PRESETS : [...ZOOM_PRESETS, curZoom].sort((a, b) => a - b));
+  /** 슬라이더를 끄는 동안의 배율(확정 전). 본문은 CSS 변환으로 즉시 따라가고, 멈추면 확정해 다시 그린다 */
+  let dragZoom = $state<number | null>(null);
+  /** 포인터로 슬라이더를 끄는 중인가(100% 근처 자석은 끌 때만: 키보드 한 칸씩 움직임은 그대로 둔다) */
+  let sliding = false;
+  let zoomTimer = 0;
+  const shownZoom = $derived(dragZoom ?? curZoom);
+  const zoomOptions = $derived(ZOOM_PRESETS.includes(shownZoom) ? ZOOM_PRESETS : [...ZOOM_PRESETS, shownZoom].sort((a, b) => a - b));
+  function onZoomSlide(e: Event & { currentTarget: HTMLInputElement }) {
+    let z = sliderToZoom(Number(e.currentTarget.value));
+    if (sliding && Math.abs(z - 1) < 0.025) z = 1; // 100% 근처에서 달라붙는다
+    dragZoom = z;
+    clearTimeout(zoomTimer);
+    zoomTimer = window.setTimeout(commitZoom, 220);
+  }
+  function commitZoom() {
+    clearTimeout(zoomTimer);
+    const z = dragZoom;
+    if (z == null) return;
+    setZoom(z);
+    dragZoom = null;
+  }
+  // 문서가 바뀌면 끌던 배율은 버린다
+  $effect(() => {
+    void ws.activeKey;
+    untrack(() => {
+      clearTimeout(zoomTimer);
+      dragZoom = null;
+    });
+  });
+  // 되돌리기가 같은 연출을 찾도록 조작 뒤의 문서 상태를 알린다
+  $effect(() => {
+    const d = ws.active;
+    if (d) noteState(d.key, d.stateId);
+  });
+
+  /** 보기 ↔ 정리 전환: 옛 썸네일이 새 화면의 같은 쪽 자리로 날아가 앉는다(실제 화면은 바로 조작할 수 있다) */
+  async function switchMode() {
+    const snaps = captureThumbs();
+    ws.toggleMode();
+    if (!snaps.length) return;
+    await tick();
+    await new Promise((r) => requestAnimationFrame(r));
+    landThumbs(snaps);
+  }
   const tabs = $derived(ws.docs.map((d) => ({ key: d.key, name: d.name, dirty: d.dirty })));
 
   function patchSettings(p: Partial<Settings>) {
@@ -413,13 +463,13 @@
     const d = doc;
     if (!d) return;
     sendOpen = false;
-    void ws.send({ from: d, pages: [...d.selected], mode, target });
+    void pa.send(ws, { from: d, pages: [...d.selected], mode, target });
   }
 
-  function onTabDrop(moving: number[], key: number) {
+  function onTabDrop(moving: number[], key: number, rects?: ScreenRect[]) {
     const d = doc;
     if (!d) return;
-    void ws.send({ from: d, pages: moving, mode: 'copy', target: { type: 'doc', key, pos: 'end' } });
+    void pa.send(ws, { from: d, pages: moving, mode: 'copy', target: { type: 'doc', key, pos: 'end' } }, rects);
   }
 
   async function onMerge(keys: number[]) {
@@ -482,16 +532,16 @@
         void ws.close(doc.key);
       } else if (!typing && doc && k === 'z') {
         e.preventDefault();
-        void ws.stepHistory(e.shiftKey ? 'redo' : 'undo');
+        void pa.step(ws, e.shiftKey ? 'redo' : 'undo');
       } else if (!typing && doc && k === 'y') {
         e.preventDefault();
-        void ws.stepHistory('redo');
+        void pa.step(ws, 'redo');
       }
       return;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (typing || !doc) return;
-    if (!e.shiftKey && e.key.toLowerCase() === 'g') { e.preventDefault(); ws.toggleMode(); return; }
+    if (!e.shiftKey && e.key.toLowerCase() === 'g') { e.preventDefault(); void switchMode(); return; }
     if (ws.mode === 'organize') return; // 아래는 보기 모드 전용(도구·쪽 이동·확대). 정리 모드의 쪽 키는 격자가 맡는다
     const tool = e.shiftKey ? undefined : TOOL_KEYS[e.key.toLowerCase()];
     if (tool) { e.preventDefault(); ui.setTool(tool); return; }
@@ -502,7 +552,7 @@
     else if (e.key === 'PageUp') { e.preventDefault(); goto(current - 1); }
     else if (e.key === '+' || e.key === '=') { e.preventDefault(); setZoom(stepZoom(curZoom, 1)); }
     else if (e.key === '-') { e.preventDefault(); setZoom(stepZoom(curZoom, -1)); }
-    else if (e.key === 'Delete' && selected.length) { e.preventDefault(); ws.remove(selected); }
+    else if (e.key === 'Delete' && selected.length) { e.preventDefault(); pa.remove(ws, selected); }
     else if (e.key === 'Escape' && selected.length) { doc.selected = []; }
   }
 
@@ -523,9 +573,9 @@
 />
 
 {#snippet actions(i: number)}
-  <IconButton icon="rotate-cw" label="{i + 1}쪽 시계 방향 90° 회전" onclick={() => ws.rotate([i])} disabled={ws.opBusy} />
-  <IconButton icon="copy" label="{i + 1}쪽 뒤에 복제" onclick={() => ws.duplicate([i])} disabled={ws.opBusy} />
-  <IconButton icon="trash" label="{i + 1}쪽 삭제" onclick={() => ws.remove([i])} disabled={ws.opBusy || total <= 1} />
+  <IconButton icon="rotate-cw" label="{i + 1}쪽 시계 방향 90° 회전" onclick={() => pa.rotate(ws, [i])} disabled={ws.opBusy} />
+  <IconButton icon="copy" label="{i + 1}쪽 뒤에 복제" onclick={() => pa.duplicate(ws, [i])} disabled={ws.opBusy} />
+  <IconButton icon="trash" label="{i + 1}쪽 삭제" onclick={() => pa.remove(ws, [i])} disabled={ws.opBusy || total <= 1} />
 {/snippet}
 
 {#snippet pageOverlay(i: number, visible: boolean)}
@@ -571,7 +621,7 @@
       {#if ws.mode === 'view'}
         <IconButton icon="folder" label="파일 열기 (Ctrl+O)" onclick={() => input.click()} />
       {/if}
-      <IconButton icon="grid" label="정리 모드 (G)" pressed={ws.mode === 'organize'} onclick={() => ws.toggleMode()} />
+      <IconButton icon="grid" label="정리 모드 (G)" pressed={ws.mode === 'organize'} onclick={() => void switchMode()} />
       <div class="anchor" bind:this={mergeRoot}>
         <IconButton
           icon="merge"
@@ -612,19 +662,35 @@
         <IconButton icon="chevron-right" label="다음 쪽" onclick={() => goto(current + 1)} disabled={current >= total - 1} />
       </div>
       <div class="zoom">
-        <IconButton icon="minus" label="축소" onclick={() => setZoom(stepZoom(curZoom, -1))} disabled={curZoom <= 0.25} />
-        <select aria-label="확대 배율" title="확대 배율" value={curZoom} onchange={(e) => setZoom(Number(e.currentTarget.value))}>
+        <input
+          class="zoom-slider"
+          type="range"
+          min="0"
+          max={ZOOM_SLIDER_MAX}
+          step="1"
+          value={zoomToSlider(shownZoom)}
+          use:rangeFill={zoomToSlider(shownZoom)}
+          aria-label="확대 배율 슬라이더"
+          aria-valuetext="{Math.round(shownZoom * 100)}%"
+          title="확대 배율 (25–400%)"
+          oninput={onZoomSlide}
+          onchange={commitZoom}
+          onpointerdown={() => (sliding = true)}
+          onpointerup={() => (sliding = false)}
+          onpointercancel={() => (sliding = false)}
+          data-testid="zoom-slider"
+        />
+        <select aria-label="확대 배율" title="확대 배율" value={shownZoom} onchange={(e) => { dragZoom = null; setZoom(Number(e.currentTarget.value)); }}>
           {#each zoomOptions as z (z)}<option value={z}>{Math.round(z * 100)}%</option>{/each}
         </select>
-        <IconButton icon="plus" label="확대" onclick={() => setZoom(stepZoom(curZoom, 1))} disabled={curZoom >= 4} />
       </div>
       {/if}
     {/if}
     <span class="spacer"></span>
     {#if doc}
       <div class="hist">
-        <IconButton icon="undo" label="되돌리기 (Ctrl+Z)" onclick={() => void ws.stepHistory('undo')} disabled={ws.opBusy || doc.undoCount === 0} />
-        <IconButton icon="redo" label="다시하기 (Ctrl+Shift+Z)" onclick={() => void ws.stepHistory('redo')} disabled={ws.opBusy || doc.redoCount === 0} />
+        <IconButton icon="undo" label="되돌리기 (Ctrl+Z)" onclick={() => void pa.step(ws, 'undo')} disabled={ws.opBusy || doc.undoCount === 0} />
+        <IconButton icon="redo" label="다시하기 (Ctrl+Shift+Z)" onclick={() => void pa.step(ws, 'redo')} disabled={ws.opBusy || doc.redoCount === 0} />
       </div>
       <div class="anchor" bind:this={printRoot}>
         <IconButton
@@ -703,6 +769,11 @@
     ondragleave={onDragLeave}
     ondrop={onDrop}
   >
+    {#if dragging}
+      <div class="veil" aria-hidden="true" in:popIn|global={{ origin: '50% 50%', from: 0.96, y: 0 }} out:popOut|global={{ origin: '50% 50%', from: 0.98, y: 0 }}>
+        <span class="veil-ico"><Icon name="upload" size={28} /></span>
+      </div>
+    {/if}
     {#if doc && ws.mode === 'organize'}
       <Organize
         {ws}
@@ -726,9 +797,9 @@
           count={selected.length}
           busy={ws.opBusy}
           notice={ws.pagesNotice}
-          onrotate={() => ws.rotate(selected)}
-          oncopy={() => ws.duplicate(selected)}
-          ondelete={() => ws.remove(selected)}
+          onrotate={() => pa.rotate(ws, selected)}
+          oncopy={() => pa.duplicate(ws, selected)}
+          ondelete={() => pa.remove(ws, selected)}
           onextract={() => void ws.extract(selected)}
           onprint={() => openPrint('selected')}
           onclear={() => (doc.selected = [])}
@@ -736,15 +807,16 @@
           extra={sendButton}
         />
         <div class="thumbs-host">
-          {#each [doc] as d (`${d.key}:${d.gen}`)}
+          {#each [doc] as d (d.key)}
             <Thumbnails
+              gen={d.gen}
               sizes={d.sizes}
               current={d.current}
               scheduler={d.scheduler}
               rev={d.rev}
               checked={d.selected}
               onselect={onPick2}
-              onreorder={(m, b) => ws.reorder(m, b)}
+              onreorder={(m, b, s) => pa.reorder(ws, m, b, s)}
               ontabdrop={onTabDrop}
               ondragtab={(s) => (dragTab = s)}
               boxW={settings.sideWidth - 56}
@@ -796,6 +868,7 @@
               bind:current={() => d.current, (v) => (d.current = v)}
               sizes={d.sizes}
               zoom={d.zoom}
+              liveZoom={dragZoom ?? d.zoom}
               scheduler={d.scheduler}
               initialPage={d.current}
               initialScroll={d.scroll}
@@ -805,8 +878,13 @@
             />
           {/each}
         {:else}
-          <div class="empty">
-            <button type="button" class="primary" onclick={() => input.click()}>파일 열기</button>
+          <div class="empty" class:hot={dragging}>
+            <div class="stack" aria-hidden="true">
+              <span class="sheet s3"></span>
+              <span class="sheet s2"></span>
+              <span class="sheet s1"><i></i><i></i><i></i><i class="short"></i></span>
+            </div>
+            <button type="button" class="primary open" onclick={() => input.click()}>파일 열기</button>
           </div>
         {/if}
         {#if ws.status}
@@ -817,6 +895,7 @@
     {/if}
 
     {#if drawerOpen}
+      <div class="scrim" aria-hidden="true" in:scrimFade out:scrimFade={{ out: true }}></div>
       <SettingsDrawer settings={{ ...settings, zoom: curZoom }} docOpen={!!doc} onchange={onSettingsChange} onclose={() => (drawerOpen = false)} />
     {/if}
   </div>
@@ -842,10 +921,40 @@
   .anchor { position: relative; }
   .page-input { width: 4.5ch; min-width: 40px; text-align: center; padding: 4px 2px; }
   .total { color: var(--fg-muted); font-variant-numeric: tabular-nums; margin: 0 4px 0 2px; }
-  .zoom select { width: 84px; }
+  .zoom { gap: 8px; padding-left: 4px; }
+  .zoom-slider { width: 132px; }
+  .zoom select { width: 88px; }
+  .toolbar > .anchor + .nav, .nav, .zoom, .hist { position: relative; }
+  .nav::before, .zoom::before, .hist::before { content: ''; position: absolute; left: -5px; top: 8px; bottom: 8px; width: 1px; background: var(--border-soft); }
 
-  .body { position: relative; flex: 1; display: flex; min-height: 0; background: var(--bg); }
-  .body.dragging { background: var(--drop-bg); outline: 2px dashed var(--fg-muted); outline-offset: -8px; }
+  .body { position: relative; flex: 1; display: flex; min-height: 0; background: var(--bg); transition: background-color var(--dur-base) var(--ease-out); }
+  .body.dragging { background: var(--drop-bg); }
+  /* 파일을 끌어 오면 작업 영역 둘레에 틀이 번지고 아이콘이 떠오른다 */
+  .veil {
+    position: absolute;
+    inset: 10px;
+    z-index: 40;
+    display: grid;
+    place-items: center;
+    border: 2px dashed color-mix(in srgb, var(--fg) 45%, var(--border));
+    border-radius: var(--r-lg);
+    background: color-mix(in srgb, var(--bg) 55%, transparent);
+    pointer-events: none;
+  }
+  .veil-ico {
+    display: grid;
+    place-items: center;
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--accent-fg);
+    box-shadow: var(--shadow-3);
+    animation: bob 1.1s var(--ease-in-out) infinite alternate;
+  }
+  @keyframes bob { from { transform: translateY(5px) scale(0.96); } to { transform: translateY(-5px) scale(1.04); } }
+  .scrim { position: absolute; inset: 0; z-index: 15; background: var(--scrim); opacity: 0.5; pointer-events: none; }
+  @media (prefers-reduced-motion: reduce) { .veil-ico { animation: none; } }
   .side {
     position: relative;
     flex: none;
@@ -873,7 +982,33 @@
   @media (pointer: coarse) {
     .split { right: -14px; width: 28px; }
   }
+  .side, .viewer-area { animation: kf-fade var(--dur-base) var(--ease-out); }
   .viewer-area { position: relative; flex: 1; min-width: 0; overflow: hidden; display: flex; flex-direction: column; }
   .viewer-host { position: relative; flex: 1; min-height: 0; overflow: hidden; }
-  .empty { position: absolute; inset: 0; display: grid; place-items: center; }
+  /* 첫 화면: 종이 석 장이 부채꼴로 펼쳐지고 버튼이 뒤따라 떠오른다. 파일을 끌어 오면 종이가 들썩인다 */
+  .empty { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 36px; }
+  .stack { position: relative; width: 132px; height: 176px; }
+  .sheet {
+    position: absolute;
+    inset: 0;
+    border-radius: 6px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-2);
+    transform-origin: 50% 100%;
+    animation: fan var(--spring-bouncy-dur) var(--spring-bouncy) backwards;
+  }
+  .sheet i { display: block; height: 6px; margin: 14px 16px 0; border-radius: 3px; background: var(--border-soft); }
+  .sheet i:first-child { margin-top: 26px; width: 55%; background: var(--border); }
+  .sheet i.short { width: 40%; }
+  .s1 { transform: rotate(0deg); animation-delay: 220ms; }
+  .s2 { transform: rotate(-7deg) translateX(-12px); animation-delay: 120ms; }
+  .s3 { transform: rotate(8deg) translateX(14px); animation-delay: 40ms; }
+  .empty.hot .s1 { transform: translateY(-14px) rotate(-1deg) scale(1.04); }
+  .empty.hot .s2 { transform: rotate(-13deg) translateX(-30px); }
+  .empty.hot .s3 { transform: rotate(14deg) translateX(32px); }
+  .sheet { transition: transform var(--spring-bouncy-dur) var(--spring-bouncy); }
+  @keyframes fan { from { opacity: 0; transform: translateY(26px) rotate(0deg) scale(0.9); } }
+  .open { padding: 6px 22px; animation: var(--kf-rise) var(--dur-slow) var(--ease-out) 380ms backwards; }
+  @media (prefers-reduced-motion: reduce) { .sheet { animation: kf-fade var(--dur-fast) backwards; } .empty.hot .sheet { transform: none; } }
 </style>

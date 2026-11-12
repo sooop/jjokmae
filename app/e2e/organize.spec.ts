@@ -14,6 +14,12 @@ async function openOrganize(app: App, files: string | string[], active?: string)
 }
 const selectedCells = (app: App) => app.page.locator('[data-cell][aria-selected=true]').evaluateAll((els) => els.map((e) => Number((e as HTMLElement).dataset.cell)));
 
+/** 탭(파일)을 닫는다. 저장 안 한 변경이 있으면 버리고 닫는다 */
+async function closeDoc(app: { page: import('@playwright/test').Page }, name: string) {
+  await app.page.getByRole('button', { name: `${name} 닫기` }).click();
+  await app.page.getByTestId('close-discard').click({ timeout: 1500 }).catch(() => {});
+}
+
 test.describe('정리 모드: 전환', () => {
   test('G·툴바 단추로 오가도 활성 문서·선택·되돌리기 기록이 이어지고, 더블클릭은 그 쪽을 보기 모드로 연다', async ({ app, page }) => {
     await app.goto();
@@ -374,7 +380,11 @@ test.describe('정리 모드: 선택한 쪽 모두 → 새 파일', () => {
     const s = await app.saveAndInspect();
     expect(texts(s.info)).toEqual(['A-2', 'B-1', 'B-3']);
     expect(await app.pageCounts()).toEqual([5, 4, 3, 3]); // 복사라 원본 그대로
-    await app.undo(); // 복사는 새 탭에만 기록되어 되돌리면 탭이 닫힌다
+    await page.keyboard.press('Control+z'); // 복사로 만든 새 파일은 되돌려도 닫히지 않는다
+    await expect(app.tabNotice()).toContainText('만든 시점');
+    expect(await app.fileNames()).toHaveLength(4);
+    await closeDoc(app, '새 문서 1.pdf');
+    await expect.poll(() => app.fileNames()).toHaveLength(3);
     expect(await app.fileNames()).toEqual(['docA.pdf', 'docB.pdf', 'docC.pdf']);
 
     // 이동
@@ -574,7 +584,7 @@ test.describe('정리 모드: 썸네일 크기', () => {
     await openOrganize(app, [G.docA, G.p24], 'docA.pdf');
     const slider = page.getByRole('slider', { name: '썸네일 크기' });
     await expect(slider).toHaveAttribute('min', '80');
-    await expect(slider).toHaveAttribute('max', '320');
+    await expect(slider).toHaveAttribute('max', '640');
     await slider.fill('120');
     await app.renderQuiet();
     const c0 = await app.renderCalls();
@@ -598,7 +608,7 @@ test.describe('정리 모드: 썸네일 크기', () => {
     expect(c4 - c4a).toBeGreaterThanOrEqual(5);
     expect(c4 - c4a).toBeLessThanOrEqual(10);
     // 최소·최대·중간에서 레이아웃(가로 넘침·칸 이탈·겹침 없음)
-    for (const v of [80, 320, 200]) {
+    for (const v of [80, 640, 200]) {
       await slider.fill(String(v));
       await expect.poll(async () => (await app.gridState()).size).toBe(v);
       const gs = await app.gridState();
@@ -716,8 +726,8 @@ test.describe('정리 모드: 300쪽', () => {
     await page.getByTestId('grid').evaluate((e) => (e.scrollTop = 1e9));
     await app.cellDrawn(299);
     // 최대 크기에서도 상한
-    await slider.fill('320');
-    await expect.poll(async () => (await app.gridState()).size).toBe(320);
+    await slider.fill('640');
+    await expect.poll(async () => (await app.gridState()).size).toBe(640);
     await app.renderQuiet();
     await app.startSampler('[data-cell] canvas');
     await app.smoothScroll('grid', 0, 3000, 4);

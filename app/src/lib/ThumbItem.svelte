@@ -54,6 +54,12 @@
     /** 더블클릭(정리 모드: 그 쪽을 보기 모드로 열기) */
     ondblopen?: (index: number) => void;
   } = $props();
+
+  /** 비트맵이 그려졌는가(그려지기 전에는 자리표시 배경을 보인다. :has() 선택자 대신 상태로 안다 — 칸이 수백 개여도 스타일 무효화가 없다) */
+  let drawn = $state(false);
+  $effect(() => {
+    if (!visible) drawn = false;
+  });
 </script>
 
 <div
@@ -61,6 +67,7 @@
   class:selected
   class:checked
   class:moving
+  class:vis={visible}
   class:grid
   class:focused
   data-thumb={index}
@@ -72,6 +79,7 @@
     <button
       type="button"
       class="face"
+      class:blank={visible && !drawn}
       aria-label="{index + 1}쪽으로 이동{checked ? ' (선택됨)' : ''}"
       title="{index + 1}쪽 · Ctrl/Shift+클릭으로 여러 쪽 선택"
       aria-current={selected ? 'page' : undefined}
@@ -79,9 +87,14 @@
       tabindex={grid ? -1 : undefined}
       onclick={(e) => onselect(index, e)}
     >
-      <PageCanvas {index} {visible} {scale} {scheduler} {priority} {rev} reuse />
+      <PageCanvas {index} {visible} {scale} {scheduler} {priority} {rev} reuse ondraw={() => (drawn = true)} />
     </button>
-    {#if checked}<span class="check" aria-hidden="true"><Icon name="check" size={14} /></span>{/if}
+    {#if selected || checked}<span class="ring" aria-hidden="true"></span>{/if}
+    {#if checked}
+      <span class="check" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path class="draw" d="M5 12.5l4.5 4.5L19 7" pathLength="1" /></svg>
+      </span>
+    {/if}
     {#if onpress}
       <button
         type="button"
@@ -117,6 +130,7 @@
     position: relative;
   }
   .face {
+    position: relative;
     display: block;
     width: 100%;
     height: 100%;
@@ -128,15 +142,34 @@
     background: var(--page-bg);
     overflow: hidden;
     touch-action: pan-y;
+    transition:
+      box-shadow var(--dur-base) var(--ease-out),
+      border-color var(--dur-fast) var(--ease-out),
+      opacity var(--dur-base) var(--ease-out),
+      transform var(--spring-snappy-dur) var(--spring-snappy);
   }
-  .face:hover:not(:disabled) { background: var(--page-bg); border-color: var(--fg-muted); }
-  .selected .face { outline: 2px solid var(--fg); outline-offset: 1px; border-color: var(--fg); }
-  .checked .face { outline: 2px dashed var(--fg); outline-offset: 1px; border-color: var(--fg); }
-  .selected.checked .face { outline-style: solid; }
-  .grid.checked .face { outline: 3px solid var(--fg); outline-offset: 0; border-color: var(--fg); }
+  .face:hover:not(:disabled) { background: var(--page-bg); border-color: var(--fg-muted); box-shadow: var(--shadow-2); }
+  .face:active:not(:disabled) { transform: scale(0.985); box-shadow: var(--shadow-1); }
+  /* 아직 그려지지 않은 쪽은 정적인 자리표시(연속 애니메이션은 스크롤 성능을 해쳐서 쓰지 않는다) */
+  .face.blank { background: color-mix(in srgb, var(--page-bg) 94%, var(--fg)); }
+  /* 선택 테두리: 칸 둘레를 감싸며 스프링으로 나타난다(선택된 칸에만 만든다) */
+  .ring {
+    position: absolute;
+    inset: -4px;
+    border: 2px solid var(--fg);
+    border-radius: 7px;
+    pointer-events: none;
+    animation: ring-in var(--spring-bouncy-dur) var(--spring-bouncy) backwards;
+  }
+  @keyframes ring-in { from { opacity: 0; transform: scale(0.95); } }
+  .checked:not(.selected):not(.grid) .ring { border-style: dashed; }
+  .grid.checked .ring { border-width: 3px; inset: -5px; border-radius: 8px; }
   .grid.focused .face { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--fg-muted); }
   .grid.checked .num { color: var(--fg); font-weight: 600; }
-  .moving { opacity: 0.45; }
+  .num { transition: color var(--dur-fast) var(--ease-out); }
+  /* 끌려 간 쪽의 원래 자리: 윤곽만 남은 자리표시 */
+  .moving .face { opacity: 0.22; border-style: dashed; box-shadow: none; }
+  .moving .ring { display: none; }
   .check {
     position: absolute;
     right: 3px;
@@ -148,7 +181,14 @@
     border-radius: 50%;
     background: var(--accent);
     color: var(--accent-fg);
+    box-shadow: 0 0 0 2px var(--page-bg), var(--shadow-1);
     pointer-events: none;
+    animation: var(--kf-pop) var(--spring-bouncy-dur) var(--spring-bouncy) both;
+  }
+  .draw { stroke-dasharray: 1; stroke-dashoffset: 1; animation: draw 260ms var(--ease-out) 110ms forwards; }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+  @media (prefers-reduced-motion: reduce) {
+    .draw { animation: none; stroke-dashoffset: 0; }
   }
   .grip {
     position: absolute;
@@ -165,9 +205,13 @@
     cursor: grab;
     touch-action: none;
     opacity: 0;
+    transition: opacity var(--dur-fast) var(--ease-out), background-color var(--dur-fast) var(--ease-out);
   }
+  .grip :global(svg) { transform: scale(0.8); transition: transform var(--spring-bouncy-dur) var(--spring-bouncy); }
   .frame:hover .grip,
   .frame:focus-within .grip { opacity: 1; }
+  .frame:hover .grip :global(svg), .frame:focus-within .grip :global(svg) { transform: none; }
+  .grip:active:not(:disabled) { cursor: grabbing; transform: none; }
   .num {
     font-size: 12px;
     line-height: 18px;
@@ -175,24 +219,31 @@
     font-variant-numeric: tabular-nums;
   }
   .selected .num { color: var(--fg); font-weight: 600; }
+  /* 아이콘 버튼 줄: 호버·포커스에서 아래에서 솟아오른다. 평소에는 배치에서 빠져 있어(칸이 수백 개여도) 비용이 없다 */
   .actions {
     position: absolute;
     left: 50%;
     bottom: 4px;
     transform: translateX(-50%);
+    transform-origin: 50% 100%;
     display: none;
     flex-direction: row;
     gap: 2px;
-    padding: 1px;
+    padding: 2px;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
-    box-shadow: 0 1px 4px rgb(0 0 0 / 0.18);
+    border-radius: var(--r-md);
+    box-shadow: var(--shadow-2);
   }
   .frame:hover .actions,
-  .frame:focus-within .actions { display: flex; }
+  .frame:focus-within .actions {
+    display: flex;
+    animation: actions-in var(--spring-pop-dur) var(--spring-pop);
+  }
+  @keyframes actions-in { from { opacity: 0; transform: translate(-50%, 9px) scale(0.94); } }
   @media (hover: none) {
     .actions { display: flex; }
     .grip { opacity: 1; width: 32px; height: 32px; }
+    .grip :global(svg) { transform: none; }
   }
 </style>
