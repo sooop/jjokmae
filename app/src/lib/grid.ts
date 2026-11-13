@@ -19,19 +19,35 @@ export interface GridGeom {
   /** 콘텐츠 전체 높이 */
   height: number;
   n: number;
+  /** 칸의 쪽 영역 높이 ÷ 폭 */
+  aspect: number;
 }
 
-export function gridGeom(width: number, thumb: number, n: number): GridGeom {
+/** 칸의 쪽 영역 높이(px) */
+export const boxHeight = (g: GridGeom): number => Math.round(g.cellW * g.aspect);
+
+const GRID_ASPECT_MIN = 0.62;
+/**
+ * 문서에 맞춘 칸 비율: 가장 세로로 긴 쪽이 잘리지 않는 높이(상한은 A4 세로). 가로 문서는 칸이 낮아져 위아래 빈 공간이 생기지 않는다.
+ */
+export function gridAspect(sizes: { width: number; height: number }[]): number {
+  let m = 0;
+  for (const s of sizes) if (s.width > 0) m = Math.max(m, s.height / s.width);
+  if (!m) return GRID_ASPECT;
+  return Math.min(GRID_ASPECT, Math.max(GRID_ASPECT_MIN, Math.ceil(m * 100) / 100));
+}
+
+export function gridGeom(width: number, thumb: number, n: number, aspect: number = GRID_ASPECT): GridGeom {
   const gap = GRID_GAP;
   const pad = GRID_PAD;
   const cellW = Math.round(thumb);
-  const cellH = Math.round(cellW * GRID_ASPECT) + GRID_LABEL;
+  const cellH = Math.round(cellW * aspect) + GRID_LABEL;
   const cols = Math.max(1, Math.floor((width - 2 * pad + gap) / (cellW + gap)));
   const used = cols * cellW + (cols - 1) * gap;
   const ox = Math.max(0, Math.floor((width - 2 * pad - used) / 2));
   const rows = Math.max(0, Math.ceil(n / cols));
   const height = rows ? pad * 2 + rows * cellH + (rows - 1) * gap : pad * 2;
-  return { cols, rows, cellW, cellH, gap, pad, ox, height, n };
+  return { cols, rows, cellW, cellH, gap, pad, ox, height, n, aspect };
 }
 
 export interface Rect {

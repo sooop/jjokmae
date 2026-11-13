@@ -15,7 +15,7 @@
   // 선택은 부모(DocState.selected)와 공유한다. 이 컴포넌트는 선택을 직접 들고 있지 않는다.
   import { onMount, untrack, type Snippet } from 'svelte';
   import type { PageSize } from '../engine/adapter';
-  import { bandHits, cellRect, dropAt, GRID_ASPECT, GRID_LABEL, gridGeom, moveFocus, renderBucket, visibleRows, type DropSpot } from './grid';
+  import { bandHits, boxHeight, cellRect, dropAt, GRID_LABEL, gridAspect, gridGeom, moveFocus, renderBucket, visibleRows, type DropSpot, type GridGeom, type Rect } from './grid';
   import { DragSession, buttonsLost, gestureActive, holdGesture, releaseGesture, watchPointerLoss } from './drag-session';
   import type { ScreenRect } from './motion/drag-ghost';
   import { notifyUpdated, registerHost, type PageHost } from './motion/page-flip';
@@ -64,8 +64,8 @@
     onchange: (selected: number[], anchor: number | null) => void;
     /** 격자 안에서 놓았을 때: moving 쪽들을 before 번 쪽 앞(n 이면 맨 끝)으로 */
     onreorder: (moving: number[], before: number, starts?: Map<number, ScreenRect>) => void;
-    /** 왼쪽 파일 목록의 항목이나 '새 파일' 칸 위에 놓았을 때(마우스). rects 는 놓은 순간 고스트의 카드 자리 */
-    ontabdrop: (moving: number[], target: DropTarget, rects?: ScreenRect[]) => void;
+    /** 왼쪽 파일 목록의 항목이나 '새 파일' 칸 위에 놓았을 때(마우스): 복사한다(move 면 이동: Shift 를 누른 채 놓음). rects 는 놓은 순간 고스트의 카드 자리 */
+    ontabdrop: (moving: number[], target: DropTarget, rects?: ScreenRect[], move?: boolean) => void;
     /** 끌기 상태 알림: 끌기 시작·이동 중에는 {over}, 끝나면 null */
     ondragtab: (state: { over: DropTarget | null } | null) => void;
     onopen: (index: number) => void;
@@ -86,7 +86,14 @@
   let hasFocus = $state(false);
 
   const n = $derived(sizes.length);
-  const geom = $derived(gridGeom(W, thumb, n));
+  // 칸 비율은 문서의 쪽 모양을 따른다(가로 문서는 낮은 칸). 연출이 조작 전·후 배열로 번갈아 물으므로 배열별로 기억해 둔다
+  const aspects = new WeakMap<PageSize[], number>();
+  function aspectOf(sz: PageSize[]): number {
+    let a = aspects.get(sz);
+    if (a == null) aspects.set(sz, (a = gridAspect(sz)));
+    return a;
+  }
+  const geom = $derived(gridGeom(W, thumb, n, aspectOf(sizes)));
   const vis = $derived(visibleRows(geom, scrollTop, H));
   const win = $derived.by(() => {
     const [a, b] = vis;
@@ -108,9 +115,19 @@
   // 렌더 해상도는 멈춘 뒤의 크기를 따른다. 화면 크기(thumb)는 바로 반영(CSS)한다.
   const settledThumb = settled(() => thumb, 240);
   const renderT = $derived(renderBucket(settledThumb.value));
-  const boxH = $derived(Math.round(geom.cellW * GRID_ASPECT));
-  const fitLive = (s: PageSize) => Math.min(geom.cellW / s.width, boxH / s.height);
-  const renderScale = (s: PageSize) => Math.min(renderT / s.width, (renderT * GRID_ASPECT) / s.height) * dpr;
+  const fitFor = (g: GridGeom, s: PageSize) => Math.min(g.cellW / s.width, boxHeight(g) / s.height);
+  const fitLive = (s: PageSize) => fitFor(geom, s);
+  /** 칸보다 낮은 쪽은 쪽 영역의 세로 가운데에 놓는다(번호는 칸 아래에 그대로) */
+  const liftFor = (g: GridGeom, s: PageSize) => Math.max(0, Math.floor((boxHeight(g) - s.height * fitFor(g, s)) / 2));
+  /** 쪽 얼굴의 내용 좌표 사각형 */
+  function faceRect(g: GridGeom, i: number, s: PageSize): Rect {
+    const r = cellRect(g, i);
+    const f = fitFor(g, s);
+    const fw = s.width * f;
+    const fh = s.height * f;
+    return { x: r.x + (r.w - fw) / 2, y: r.y + r.h - (fh + GRID_LABEL - 2) - liftFor(g, s), w: fw, h: fh };
+  }
+  const renderScale = (s: PageSize) => Math.min(renderT / s.width, (renderT * geom.aspect) / s.height) * dpr;
   const showActions = $derived(geom.cellW >= 112);
 
   let centerIdx = 0;
@@ -224,7 +241,12 @@
     const x1 = bandSt.x0;
     const y1 = bandSt.y0;
     band = { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
-    const hits = bandHits(geom, x1, y1, x2, y2);
+    // 칸이 아니라 실제로 보이는 쪽 얼굴과 겹쳐야 고른다(칸 안의 빈 자리만 스친 쪽은 고르지 않는다)
+    const bx0 = Math.min(x1, x2), bx1 = Math.max(x1, x2), by0 = Math.min(y1, y2), by1 = Math.max(y1, y2);
+    const hits = bandHits(geom, x1, y1, x2, y2).filter((i) => {
+      const f = faceRect(geom, i, sizes[i]);
+      return bx0 <= f.x + f.w && bx1 >= f.x && by0 <= f.y + f.h && by1 >= f.y;
+    });
     const next = bandSt.add ? [...new Set([...bandSt.base, ...hits])].sort((a, b) => a - b) : hits;
     if (!sameList(next, selected)) onchange(next, next.length ? (bandSt.add ? bandSt.baseAnchor : next[0]) : null);
     const r = scroller.getBoundingClientRect();
@@ -305,7 +327,7 @@
   let returning = $state<number[]>([]);
   const isMoving = (i: number) => (!!drag && drag.moving.includes(i)) || returning.includes(i);
 
-  const session = new DragSession<{ before: number; target: DropTarget | null }>({
+  const session: DragSession<{ before: number; target: DropTarget | null; move: boolean }> = new DragSession({
     scroller: () => scroller,
     token: () => `${gen}:${stateId}`,
     edgeStep: 14,
@@ -320,9 +342,9 @@
     },
     label: () => ghostLabel(),
     update: () => updateDrag(),
-    snapshot: () => ({ before: drag!.spot.before, target: drag!.target }),
-    drop: (moving, grabbed, rects, { before, target }) => {
-      if (target != null) ontabdrop(moving, target, rects);
+    snapshot: () => ({ before: drag!.spot.before, target: drag!.target, move: session.shift }),
+    drop: (moving, grabbed, rects, { before, target, move }) => {
+      if (target != null) ontabdrop(moving, target, rects, move);
       else {
         // 놓은 쪽들은 고스트가 있던 자리(부채꼴 카드)에서 새 자리로 흩어져 내려앉는다
         const starts = new Map<number, ScreenRect>();
@@ -348,10 +370,11 @@
   function ghostLabel(): string {
     const d = drag;
     if (!d) return '';
+    const how = session.shift ? '이동' : '복사 · Shift 이동';
     return d.target === 'new'
-      ? `${d.moving.length}쪽을 새 파일로 복사`
+      ? `${d.moving.length}쪽을 새 파일로 ${how}`
       : d.target != null
-        ? `${d.moving.length}쪽을 ‘${d.targetName}’ 끝에 복사`
+        ? `${d.moving.length}쪽을 ‘${d.targetName}’ 끝에 ${how}`
         : d.moving.length > 1
           ? `${d.moving.length}쪽 이동`
           : `${d.moving[0] + 1}쪽 이동`;
@@ -484,19 +507,10 @@
   // ---------- 쪽 이동 연출(FLIP) 호스트 ----------
   let flyLayer: HTMLDivElement | undefined = $state();
   let holding = $state(false);
-  const fitFor = (g: ReturnType<typeof gridGeom>, s: PageSize) => Math.min(g.cellW / s.width, Math.round(g.cellW * GRID_ASPECT) / s.height);
   const host: PageHost = {
     layer: () => flyLayer ?? null,
     sizes: () => sizes,
-    frameRect: (idx, sz) => {
-      const g = gridGeom(W, thumb, sz.length);
-      const r = cellRect(g, idx);
-      const s = sz[idx];
-      const f = fitFor(g, s);
-      const fw = s.width * f;
-      const fh = s.height * f;
-      return { x: r.x + (r.w - fw) / 2, y: r.y + r.h - (fh + GRID_LABEL - 2), w: fw, h: fh };
-    },
+    frameRect: (idx, sz) => faceRect(gridGeom(W, thumb, sz.length, aspectOf(sz)), idx, sz[idx]),
     viewport: () => ({ top: scroller.scrollTop, bottom: scroller.scrollTop + scroller.clientHeight }),
     canvas: (i) => canvasOf(i),
     checked: (i) => selSet.has(i),
@@ -636,6 +650,7 @@
               index={i}
               width={s.width * fitLive(s)}
               height={s.height * fitLive(s)}
+              lift={liftFor(geom, s)}
               selected={false}
               checked={selSet.has(i)}
               grid

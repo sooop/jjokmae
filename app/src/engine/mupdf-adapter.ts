@@ -21,6 +21,8 @@ import type {
   StampImage,
 } from './adapter';
 import type { BinaryRef, BinarySource } from './binary-source';
+// 값 import 는 확장자를 적는다(Node 타입 스트리핑으로 시험에서 이 파일을 직접 import 한다)
+import { findInChars, type SearchOptions, type TextChar } from './text-search.ts';
 import type * as MuPDFTypes from 'mupdf';
 
 type MuPDF = typeof MuPDFTypes;
@@ -560,6 +562,34 @@ export class MupdfAdapter implements EngineAdapter {
       const st = page.toStructuredText('preserve-whitespace');
       try {
         return st.asText();
+      } finally {
+        st.destroy();
+      }
+    });
+  }
+
+  async searchPage(doc: DocId, pageIndex: number, needle: string, opts?: SearchOptions): Promise<number[][][]> {
+    if (!needle.trim()) return [];
+    return this.withPage(doc, pageIndex, (page) => {
+      const st = page.toStructuredText('preserve-whitespace');
+      try {
+        const chars: TextChar[] = [];
+        let line = 0;
+        st.walk({
+          beginLine: () => {
+            line++;
+          },
+          onChar: (c, _origin, _font, _size, quad) => {
+            const xs = [quad[0], quad[2], quad[4], quad[6]];
+            const ys = [quad[1], quad[3], quad[5], quad[7]];
+            const x0 = Math.min(...xs);
+            const x1 = Math.max(...xs);
+            const y0 = Math.min(...ys);
+            const y1 = Math.max(...ys);
+            chars.push({ ch: c, box: x1 > x0 && y1 > y0 ? { x0, y0, x1, y1 } : null, line });
+          },
+        });
+        return findInChars(chars, needle, opts);
       } finally {
         st.destroy();
       }

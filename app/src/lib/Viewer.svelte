@@ -18,6 +18,7 @@
     initialPage = 0,
     initialScroll = null,
     rev = [],
+    pinned = [],
     overlay,
     ondraw,
     onwheelzoom,
@@ -34,6 +35,11 @@
     initialScroll?: { top: number; left: number } | null;
     /** 쪽별 무효화 키. 바뀐 쪽만 다시 그린다 */
     rev?: number[];
+    /**
+     * 화면 밖이어도 DOM 에 남겨 둘 쪽(양식 칸이 있는 쪽·주석을 고른 쪽). 그 밖의 쪽은 렌더 창을 벗어나면 DOM 에서 뺀다
+     * (쪽이 수백 장이어도 칸·레이어 수가 일정하다). 남겨 둔 쪽도 비트맵은 창 안에서만 그린다.
+     */
+    pinned?: number[];
     /** 쪽 위에 겹치는 레이어(쪽 번호, 렌더 창 안인지) */
     overlay?: Snippet<[number, boolean]>;
     /** 쪽 비트맵을 그린 직후(쪽 번호, 그 때의 rev) */
@@ -131,6 +137,31 @@
     });
   });
 
+  /** 입력 포커스가 있는 쪽: 창 밖으로 스크롤해도 DOM 에 남긴다(입력 중인 내용·포커스가 사라지지 않게) */
+  let focusPin = $state(-1);
+  const domPages = $derived.by(() => {
+    const n = sizes.length;
+    const out: number[] = [];
+    for (let i = Math.max(0, winA); i <= Math.min(n - 1, winB); i++) out.push(i);
+    const extra = focusPin >= 0 ? [...pinned, focusPin] : pinned;
+    let add = false;
+    for (const i of extra) {
+      if (i >= 0 && i < n && (i < winA || i > winB) && !out.includes(i)) {
+        out.push(i);
+        add = true;
+      }
+    }
+    return add ? out.sort((a, b) => a - b) : out;
+  });
+  function onFocusIn(e: FocusEvent) {
+    const el = (e.target as Element | null)?.closest?.('[data-page]') as HTMLElement | null;
+    focusPin = el ? Number(el.dataset.page) : -1;
+  }
+  function onFocusOut(e: FocusEvent) {
+    const to = e.relatedTarget as Element | null;
+    if (!to || !scroller?.contains(to)) focusPin = -1;
+  }
+
   const cssScale = $derived(zoom * CSS_PER_PT);
   const widths = $derived(sizes.map((s) => s.width * cssScale));
   const heights = $derived(sizes.map((s) => s.height * cssScale));
@@ -214,6 +245,31 @@
     update();
   }
 
+  /**
+   * 쪽 안의 사각형(쪽 공간 pt)이 보이게 한다. 이미 여유 있게 보이면 스크롤하지 않는다(찾기 결과로 이동할 때).
+   * 쪽이 DOM 에 없어도 배치 계산만으로 간다.
+   */
+  export function revealRect(i: number, r: { x: number; y: number; w: number; h: number }) {
+    if (!scroller || i < 0 || i >= sizes.length) return;
+    const M = 48;
+    const top = layout.tops[i] + r.y * cssScale;
+    const bottom = top + r.h * cssScale;
+    const st = scroller.scrollTop;
+    const vh = scroller.clientHeight;
+    if (top < st + M || bottom > st + vh - M) {
+      lockUntil = performance.now() + 150;
+      current = i;
+      scroller.scrollTop = Math.max(0, top - vh * 0.35);
+    }
+    const vw = scroller.clientWidth;
+    const contentW = Math.max(vw, maxW + PAD * 2);
+    const left = (contentW - widths[i]) / 2 + r.x * cssScale;
+    const right = left + r.w * cssScale;
+    const sl = scroller.scrollLeft;
+    if (left < sl + 16 || right > sl + vw - 16) scroller.scrollLeft = Math.max(0, left - Math.min(vw * 0.3, 120));
+    update();
+  }
+
   // 확대 배율이 바뀌면 화면 중앙에 있던 지점을 그대로 유지한다.
   // DOM 갱신 전에 이전 배치로 기준점을 잡고(pre), 갱신 뒤에 새 배치로 스크롤을 복원한다.
   $effect.pre(() => {
@@ -275,9 +331,9 @@
   });
 </script>
 
-<div class="scroller" bind:this={scroller} onscroll={onScroll} data-testid="scroller">
+<div class="scroller" bind:this={scroller} onscroll={onScroll} onfocusin={onFocusIn} onfocusout={onFocusOut} data-testid="scroller" data-pages={sizes.length}>
   <div class="content" bind:this={contentEl} style:height="{layout.total}px" style:min-width="{maxW + PAD * 2}px">
-    {#each sizes as _, i (i)}
+    {#each domPages as i (i)}
       <div
         class="slot"
         data-page={i}
@@ -312,7 +368,11 @@
     inset: 0;
     overflow: auto;
     overscroll-behavior: contain;
+    /* 쪽 사이 빈 곳을 끌 때 브라우저의 기본 선택(쪽 전체가 파랗게 칠해짐)이 생기지 않게 한다. 입력 칸·글상자는 각자 선택을 허용한다 */
+    user-select: none;
+    -webkit-user-select: none;
   }
+  .scroller :global(input), .scroller :global(textarea), .scroller :global(select) { user-select: text; -webkit-user-select: text; }
   .content {
     position: relative;
     width: 100%;

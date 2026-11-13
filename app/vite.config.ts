@@ -127,6 +127,9 @@ export default defineConfig(({ mode }) => {
       },
     },
     define: { __TARGET__: JSON.stringify(target) },
+    // 엔진 라이브러리는 워커에서만 import 되어 시작 스캔에 잡히지 않는다. 미리 넣어 두지 않으면 dev 에서 엔진을 처음 띄울 때
+    // "새 의존성 발견 → 페이지 전체 새로고침"이 일어나 열던 문서가 사라진다.
+    optimizeDeps: { include: ['mupdf', '@embedpdf/pdfium'] },
     // mupdf.js 에 최상위 await 가 있어 iife 불가 → es. single 은 위 플러그인이 별도로 처리한다.
     worker: { format: 'es' as const, plugins: () => [mupdfNoWasmAsset()] },
     build: {

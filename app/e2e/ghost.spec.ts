@@ -11,7 +11,8 @@ test.use({ viewport: { width: 1400, height: 1400 } });
 
 /** 문서를 열고 모드를 맞춘 뒤 앞쪽 n 개가 그려질 때까지 */
 async function setup(app: App, mode: Mode, files: string | string[], active?: string, drawn = 5) {
-  await app.goto();
+  // 끌기 좌표가 썸네일 크기에 맞춰져 있어 패널 폭을 고정한다
+  await app.goto({ sideWidth: 176 });
   await app.open(files);
   if (mode === 'organize') await app.setMode('organize');
   if (active) {

@@ -205,10 +205,10 @@
     if (d) void pa.send(ws, { from: d, pages: m.pages, mode, target });
   }
 
-  function onTabDrop(moving: number[], target: DropTarget, rects?: ScreenRect[]) {
+  function onTabDrop(moving: number[], target: DropTarget, rects?: ScreenRect[], move = false) {
     const d = doc;
     if (!d) return;
-    void pa.send(ws, { from: d, pages: moving, mode: 'copy', target: target === 'new' ? { type: 'new' } : { type: 'doc', key: target, pos: 'end' } }, rects);
+    void pa.send(ws, { from: d, pages: moving, mode: move ? 'move' : 'copy', target: target === 'new' ? { type: 'new' } : { type: 'doc', key: target, pos: 'end' } }, rects);
   }
 
   const sel = $derived(doc?.selected ?? []);

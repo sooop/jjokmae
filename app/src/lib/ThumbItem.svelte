@@ -26,6 +26,7 @@
     focused = false,
     showActions = true,
     ondblopen,
+    lift = 0,
   }: {
     index: number;
     width: number;
@@ -53,6 +54,8 @@
     showActions?: boolean;
     /** 더블클릭(정리 모드: 그 쪽을 보기 모드로 열기) */
     ondblopen?: (index: number) => void;
+    /** 쪽 얼굴을 번호 위로 띄우는 거리(px). 격자에서 칸보다 낮은 쪽을 쪽 영역 가운데에 놓는다 */
+    lift?: number;
   } = $props();
 
   /** 비트맵이 그려졌는가(그려지기 전에는 자리표시 배경을 보인다. :has() 선택자 대신 상태로 안다 — 칸이 수백 개여도 스타일 무효화가 없다) */
@@ -75,7 +78,7 @@
   ondblclick={() => ondblopen?.(index)}
   role="presentation"
 >
-  <div class="frame" style:width="{width}px" style:height="{height}px">
+  <div class="frame" style:width="{width}px" style:height="{height}px" style:margin-bottom={lift ? `${lift}px` : undefined}>
     <button
       type="button"
       class="face"

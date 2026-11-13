@@ -9,6 +9,8 @@
 
 import { init } from '@embedpdf/pdfium';
 import type { WrappedPdfiumModule } from '@embedpdf/pdfium';
+// 값 import 는 확장자를 적는다(Node 타입 스트리핑으로 시험에서 이 파일을 직접 import 한다)
+import { findInChars, type TextChar } from './text-search.ts';
 import type {
   Annotation,
   AnnotationType,
@@ -1240,6 +1242,57 @@ export function createPdfiumAdapter(options: PdfiumAdapterOptions): PdfiumAdapte
           }
           flush();
           return out;
+        }),
+      );
+    },
+
+    async searchPage(id, pageIndex, needle, opts) {
+      if (!needle.trim()) return [];
+      const st = getDoc(id);
+      const L = lib();
+      return withPage(st, pageIndex, (page) =>
+        withTextPage(page, (tp) => {
+          const n = L.FPDFText_CountChars(tp);
+          if (n <= 0) return [];
+          const xf = pageXf(page);
+          const chars: TextChar[] = [];
+          mem((alloc) => {
+            const r = alloc(32);
+            const d = (k: number) => P().getValue(r + k * 8, 'double') as number;
+            let line = 0;
+            let prev: { y0: number; y1: number; x1: number } | null = null;
+            for (let i = 0; i < n; i++) {
+              const code = L.FPDFText_GetUnicode(tp, i);
+              const ch = code ? String.fromCodePoint(code) : ' ';
+              if (code === 13 || code === 10) {
+                // 엔진이 줄 끝에 넣는 줄바꿈: 다음 글자부터 새 줄
+                if (prev) line++;
+                prev = null;
+                chars.push({ ch: ' ', box: null, line });
+                continue;
+              }
+              let box: TextChar['box'] = null;
+              if (L.FPDFText_GetCharBox(tp, i, r, r + 8, r + 16, r + 24)) {
+                const b = [d(0), d(2), d(1), d(3)]; // left, right, bottom, top → l, b, r, t
+                if (b[2] > b[0] && b[3] > b[1]) {
+                  const rc = userBoxToRect(xf, b[0], b[1], b[2], b[3]);
+                  // 글자 모양 상자는 낮을 수 있으므로 글꼴 크기의 1.3배까지 위아래로 넓힌다(textQuads 와 같은 규칙)
+                  const extra = Math.max(0, L.FPDFText_GetFontSize(tp, i) * 1.3 - rc.height) / 2;
+                  box = { x0: rc.x, y0: rc.y - extra, x1: rc.x + rc.width, y1: rc.y + rc.height + extra };
+                }
+              }
+              if (box) {
+                // 줄바꿈 글자 없이 줄이 넘어간 경우: 세로로 겹치지 않으면 새 줄로 본다
+                if (prev) {
+                  const overlap = Math.min(prev.y1, box.y1) - Math.max(prev.y0, box.y0);
+                  if (overlap < Math.min(prev.y1 - prev.y0, box.y1 - box.y0) * 0.5) line++;
+                }
+                prev = { y0: box.y0, y1: box.y1, x1: box.x1 };
+              }
+              chars.push({ ch, box, line });
+            }
+          });
+          return findInChars(chars, needle, opts);
         }),
       );
     },

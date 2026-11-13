@@ -1,6 +1,10 @@
 <script lang="ts">
   // 한 페이지(또는 썸네일)의 비트맵을 그리는 캔버스. visible 이 true 인 동안만 렌더를 요청하고,
   // false 가 되면 요청을 취소하고 캔버스 크기를 0 으로 만들어 비트맵을 해제한다.
+  // 같은 내용의 그림이 비트맵 캐시에 있으면 엔진에 요청하지 않고 바로 그린다(쪽 순서 바꾸기·삭제·복제·모드 전환 뒤).
+  import { untrack } from 'svelte';
+  import { pageBitmaps } from './bitmap-cache';
+  import { reduced } from './motion';
   import { stats, type RenderScheduler } from './render-queue';
 
   let {
@@ -29,9 +33,11 @@
   } = $props();
 
   let canvas: HTMLCanvasElement;
-  let ready = $state(false);
+  /** 요청한 배율로 그린 그림의 배율(임시 그림만 있으면 0) */
   let drawnScale = 0;
   let drawnRev = -1;
+  /** 캔버스에 무언가(임시 그림 포함) 그려져 있는가 */
+  let shown = false;
 
   function release() {
     if (!canvas) return;
@@ -39,7 +45,19 @@
     canvas.height = 0;
     drawnScale = 0;
     drawnRev = -1;
-    ready = false;
+    shown = false;
+  }
+
+  function paint(bmp: ImageBitmap) {
+    const t0 = performance.now();
+    canvas.width = bmp.width;
+    canvas.height = bmp.height;
+    canvas.getContext('2d')?.drawImage(bmp, 0, 0);
+    shown = true;
+    const dt = performance.now() - t0;
+    stats.draws++;
+    stats.drawMs += dt;
+    stats.drawMax = Math.max(stats.drawMax, dt);
   }
 
   $effect(() => {
@@ -49,8 +67,33 @@
     }
     const s = scale;
     const r = rev;
+    const idx = index;
+    const sch = scheduler;
     if (drawnRev === r && (drawnScale === s || (reuse && drawnScale > s))) return;
-    const job = scheduler.request(index, s, priority);
+    // 캐시에서 바로 그릴 수 있으면 요청하지 않는다. 내용 id 는 반응 상태가 아니다(바뀔 때는 rev 나 화면 재생성이 함께 온다)
+    const key = sch.cacheKey(idx);
+    const done = untrack(() => {
+      if (key == null) return false;
+      const hit = pageBitmaps.get(key, s);
+      if (hit) {
+        paint(hit);
+        drawnScale = s;
+        drawnRev = r;
+        ondraw?.(r);
+        return true;
+      }
+      // 같은 내용의 다른 배율 그림이 있으면(썸네일 ↔ 본문, 확대 전후) 새 그림이 올 때까지 그것을 늘려 보여 준다
+      if (!shown) {
+        const near = pageBitmaps.nearest(key, s);
+        if (near) {
+          paint(near);
+          ondraw?.(r);
+        }
+      }
+      return false;
+    });
+    if (done) return;
+    const job = sch.request(idx, s, priority);
     let alive = true;
     void job.promise.then(async (b) => {
       if (!alive || !b) return;
@@ -64,18 +107,18 @@
         bmp.close();
         return;
       }
-      const t0 = performance.now();
-      canvas.width = b.width;
-      canvas.height = b.height;
-      canvas.getContext('2d')?.drawImage(bmp, 0, 0);
-      bmp.close();
+      const first = !shown;
+      paint(bmp);
+      // 요청한 뒤로 이 쪽의 내용 id 가 바뀌었으면(그 사이 편집) 어느 내용의 그림인지 알 수 없으므로 캐시에 넣지 않는다
+      if (key == null || sch.cacheKey(idx) !== key || !pageBitmaps.put(key, s, bmp)) bmp.close();
       drawnScale = s;
       drawnRev = r;
-      ready = true;
-      const dt = performance.now() - t0;
-      stats.draws++;
-      stats.drawMs += dt;
-      stats.drawMax = Math.max(stats.drawMax, dt);
+      // 자리표시에서 실제 이미지로: 처음 그려질 때 한 번만 부드럽게 나타난다. CSS 애니메이션으로 걸어 두면 스크롤 표시
+      // (data-scrolling)가 풀릴 때 모든 쪽의 애니메이션이 다시 시작해 화면이 깜박이므로 그릴 때 직접 한 번 재생한다.
+      // 빠르게 스크롤하는 동안은 바로 보인다(수십 장이 동시에 페이드하면 프레임이 끊긴다).
+      if (first && canvas.animate && !canvas.closest('[data-scrolling]')) {
+        canvas.animate([{ opacity: 0 }, { opacity: 1 }], { duration: reduced() ? 90 : 160, easing: 'ease-out' });
+      }
       ondraw?.(r);
     });
     return () => {
@@ -87,19 +130,12 @@
   $effect(() => release);
 </script>
 
-<canvas bind:this={canvas} class:ready width="0" height="0"></canvas>
+<canvas bind:this={canvas} width="0" height="0"></canvas>
 
 <style>
   canvas {
     display: block;
     width: 100%;
     height: 100%;
-  }
-  /* 자리표시에서 실제 이미지로: 처음 그려질 때만 부드럽게 나타난다 */
-  canvas.ready { animation: kf-fade var(--dur-base) var(--ease-out); }
-  /* 빠르게 스크롤하는 동안은 새로 그려진 쪽을 바로 보인다(수십 장이 동시에 페이드하면 프레임이 끊긴다) */
-  :global([data-scrolling]) canvas.ready { animation: none; }
-  @media print {
-    canvas { animation: none !important; opacity: 1 !important; }
   }
 </style>

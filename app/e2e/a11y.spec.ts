@@ -89,7 +89,7 @@ test.describe('접근성: 역할과 이름', () => {
     await expect(page.getByRole('complementary', { name: '페이지 목록' })).toBeVisible();
     await expect(page.getByRole('main', { name: '뷰어' })).toBeVisible();
     await expect(page.getByRole('region', { name: '작업 영역' })).toBeVisible();
-    await expect(page.getByRole('separator', { name: '썸네일 패널 폭 조절' })).toHaveAttribute('aria-valuenow', '176');
+    await expect(page.getByRole('separator', { name: '썸네일 패널 폭 조절' })).toHaveAttribute('aria-valuenow', '208');
     // 도구 모음
     await expect(page.getByRole('toolbar', { name: '선택한 쪽 조작' })).toBeVisible();
     await expect(page.getByRole('toolbar', { name: '주석 도구' })).toBeVisible();

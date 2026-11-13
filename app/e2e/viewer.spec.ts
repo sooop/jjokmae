@@ -95,8 +95,20 @@ test.describe('보기: 확대·쪽 이동·단축키', () => {
   test('쪽 크기가 서로 다른 문서도 모든 쪽이 겹치지 않고 위에서 아래로 놓인다', async ({ app }) => {
     await app.goto();
     await app.open(G.five);
-    const boxes = await app.page.locator('[data-page]').evaluateAll((els) => els.map((e) => e.getBoundingClientRect()).map((r) => ({ top: r.top, bottom: r.bottom, w: r.width })));
-    expect(boxes).toHaveLength(5);
+    // 본문은 보이는 쪽 근처만 DOM 에 두므로, 쪽마다 드러낸 뒤 내용 좌표(스크롤 위치 포함)로 자리를 잰다
+    const boxes: { top: number; bottom: number }[] = [];
+    for (let i = 0; i < 5; i++) {
+      await app.reveal('scroller', i);
+      boxes.push(
+        await app.slot(i).evaluate((e) => {
+          const sc = e.closest('[data-testid=scroller]') as HTMLElement;
+          const r = e.getBoundingClientRect();
+          const top = r.top - sc.getBoundingClientRect().top + sc.scrollTop;
+          return { top, bottom: top + r.height };
+        }),
+      );
+    }
+    await expect(app.page.getByTestId('scroller')).toHaveAttribute('data-pages', '5');
     for (let i = 1; i < boxes.length; i++) expect(boxes[i].top).toBeGreaterThanOrEqual(boxes[i - 1].bottom - 1);
   });
 });
@@ -104,17 +116,22 @@ test.describe('보기: 확대·쪽 이동·단축키', () => {
 test.describe('보기: 300쪽 문서(가상화)', () => {
   test.setTimeout(180_000);
 
-  test('쪽 자리는 300개를 모두 잡지만 비트맵은 보이는 근처만 들고, 멀어진 쪽은 버린다', async ({ app, page }) => {
+  test('쪽 자리(높이)는 300쪽을 모두 잡지만 칸과 비트맵은 보이는 근처만 들고, 멀어진 쪽은 버린다', async ({ app, page }) => {
     await app.goto();
     await app.open(G.big300);
     expect(await app.total()).toBe(300);
-    await expect(page.locator('[data-page]')).toHaveCount(300);
+    await expect(page.getByTestId('scroller')).toHaveAttribute('data-pages', '300');
     await app.pageDrawn(0);
+    // 칸(쪽 슬롯·썸네일 줄)은 쪽 수와 무관하게 보이는 근처만 만든다
+    expect(await page.locator('[data-page]').count()).toBeLessThanOrEqual(12);
+    expect(await page.locator('[data-testid=thumbs] [data-thumb]').count()).toBeLessThanOrEqual(40);
+    const span = await page.getByTestId('scroller').evaluate((s) => s.scrollHeight / s.clientHeight);
+    expect(span).toBeGreaterThan(100);
     expect(await liveCanvases(app)).toBeLessThanOrEqual(60);
     await app.gotoPage(200);
     await app.pageDrawn(199);
     // 처음 쪽의 비트맵은 버려진다
-    await expect.poll(() => page.locator('[data-page="0"] canvas').evaluate((c: HTMLCanvasElement) => c.width)).toBe(0);
+    await expect(page.locator('[data-page="0"]')).toHaveCount(0);
     expect(await liveCanvases(app)).toBeLessThanOrEqual(60);
   });
 

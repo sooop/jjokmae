@@ -9,6 +9,7 @@ import type { DocId, PageSize, Rotation } from '../engine/adapter';
 import type { EngineKind } from '../engine/protocol';
 import type { EngineClient } from '../engine/worker-client';
 import { baseName, downloadBytes, editedName } from './download';
+import { freshCids, newCid } from './bitmap-cache';
 import { bootEngine, bootErrorMessage, ENGINE_LABEL } from './engine-boot';
 import { EnginePool } from './engine-pool';
 import { GhostStore, HistoryPool, UndoHistory, type HasBytes } from './history';
@@ -26,6 +27,8 @@ export type RotState = (Rotation | null)[];
 /** 되돌리기용 스냅샷: 조작 전 문서 바이트와 화면 상태 */
 export interface Snap extends HasBytes {
   rot: RotState;
+  /** 쪽별 내용 id(비트맵 캐시 열쇠). 되돌리면 그때의 id 로 돌아가 캐시에 남은 그림을 다시 쓴다 */
+  cids?: number[];
   current: number;
   selected: number[];
   name: string;
@@ -39,6 +42,8 @@ export interface Snap extends HasBytes {
 
 export interface OpResult {
   rot: RotState;
+  /** 조작 뒤 쪽별 내용 id. 그림이 그대로인 쪽은 옛 id 를 물려준다(없으면 모두 새 id: 전부 다시 그린다) */
+  cids?: number[];
   current: number;
   selected: number[];
 }
@@ -100,6 +105,8 @@ export class DocState {
   /** 정리 모드 격자의 스크롤 위치 */
   gridScroll = 0;
   rot: RotState = [];
+  /** 쪽별 내용 id(비트맵 캐시 열쇠). 쪽 그림이 바뀌면 그 쪽만 새 id 를 받는다 */
+  cids: number[] = [];
   stateId = $state(0);
   savedStateId = $state(0);
   /** 이 문서를 연 뒤 쪽을 삭제한 적이 있는가(저장 안내 문구용) */
@@ -272,7 +279,8 @@ export class Workspace {
     d.rot = Array.from({ length: sizes.length }, (_, i) => rot[i] ?? null);
     d.zoom = zoom;
     d.gen = ++this.genSeq;
-    d.scheduler = new RenderScheduler(client, id, 2);
+    d.cids = freshCids(sizes.length);
+    d.scheduler = new RenderScheduler(client, id, 2, undefined, (i) => d.cids[i]);
     d.history.ondrop = (st) => {
       d.syncHistory();
       if (st.bundle != null) this.ghosts.delete(st.bundle);
@@ -517,7 +525,7 @@ export class Workspace {
 
   private async takeSnap(c: EngineClient, d: DocState): Promise<Snap> {
     const r = await this.rebase(c, d);
-    return { bytes: r.bytes, rot: [...d.rot], current: d.current, selected: [...d.selected], name: d.name, stateId: d.stateId };
+    return { bytes: r.bytes, rot: [...d.rot], cids: [...d.cids], current: d.current, selected: [...d.selected], name: d.name, stateId: d.stateId };
   }
 
   private pushHistory(d: DocState, snap: Snap, bundle?: number) {
@@ -527,7 +535,7 @@ export class Workspace {
   }
 
   /** 엔진 문서 id 를 화면 상태로 만든다. 이전 문서는 닫는다(id 가 다를 때) */
-  private async installDoc(d: DocState, id: DocId, rot: RotState, cur: number, sel: number[]) {
+  private async installDoc(d: DocState, id: DocId, rot: RotState, cur: number, sel: number[], cids?: number[]) {
     const c = this.clientOf(d);
     const sizes = await this.readSizes(c, id);
     const n = sizes.length;
@@ -544,7 +552,8 @@ export class Workspace {
     d.anchor = d.selected.length ? d.selected[0] : null;
     d.scroll = null;
     d.rev = sizes.map(() => 0);
-    d.scheduler = new RenderScheduler(c, id, 2);
+    d.cids = cids && cids.length === n ? [...cids] : freshCids(n);
+    d.scheduler = new RenderScheduler(c, id, 2, undefined, (i) => d.cids[i]);
     d.gen = ++this.genSeq;
     if (oldId !== id) await c.close(oldId).catch(() => {});
     if (d.key === this.activeKey) {
@@ -561,11 +570,11 @@ export class Workspace {
    * 바이트를 새로 열어 화면 상태로 만든다. 설치에 실패하면 방금 연 엔진 문서를 닫는다(누수 방지).
    * 설치에 실패해도 d.id 는 그대로다.
    */
-  private async installFresh(d: DocState, bytes: Uint8Array, rot: RotState, cur: number, sel: number[]) {
+  private async installFresh(d: DocState, bytes: Uint8Array, rot: RotState, cur: number, sel: number[], cids?: number[]) {
     const c = this.clientOf(d);
     const id = await c.open(bytes.slice());
     try {
-      await this.installDoc(d, id, rot, cur, sel);
+      await this.installDoc(d, id, rot, cur, sel, cids);
     } catch (e) {
       if (d.id !== id) await c.close(id).catch(() => {});
       throw e;
@@ -573,7 +582,7 @@ export class Workspace {
   }
 
   private async restoreSnap(d: DocState, snap: Snap) {
-    await this.installFresh(d, snap.bytes, snap.rot, snap.current, snap.selected);
+    await this.installFresh(d, snap.bytes, snap.rot, snap.current, snap.selected, snap.cids);
   }
 
   /**
@@ -598,7 +607,7 @@ export class Workspace {
     try {
       const res = await fn(c, d, snap);
       // 설치가 끝난 뒤에 기록한다(설치가 실패하면 아래에서 조작 전 상태로 복구하므로, 먼저 기록하면 기록만 남는다)
-      await this.installDoc(d, d.id, res.rot, res.current, res.selected);
+      await this.installDoc(d, d.id, res.rot, res.current, res.selected, res.cids);
       this.pushHistory(d, snap, bundle);
       return true;
     } catch (e) {
@@ -643,11 +652,16 @@ export class Workspace {
       const fast = !!target.pages && target.pages.every((p) => p >= 0 && p < d.rev.length);
       if (fast) {
         try {
+          // 갈아타는 사이에 끝나는 렌더가 옛 id 로 캐시에 들어가지 않게, 바뀌는 쪽의 id 를 먼저 바꿔 둔다
+          for (const p of target.pages!) d.cids[p] = newCid();
           await this.swapLive(c, d, target.bytes);
           cur.pages = target.pages;
           put(cur);
           d.stateId = target.stateId;
-          for (const p of target.pages!) d.rev[p]++;
+          for (const p of target.pages!) {
+            d.cids[p] = target.cids?.[p] ?? newCid();
+            d.rev[p]++;
+          }
           if (d.key === this.activeKey) this.hooks.afterSwap?.(d);
           return true;
         } catch (e) {
@@ -659,13 +673,13 @@ export class Workspace {
       d.scheduler.dispose();
       try {
         // 열기·설치가 모두 성공한 뒤에 기록·stateId 를 바꾼다(실패하면 설치하다 만 id 는 installFresh 가 닫는다)
-        await this.installFresh(d, target.bytes, target.rot, target.current, target.selected);
+        await this.installFresh(d, target.bytes, target.rot, target.current, target.selected, target.cids);
         put(cur);
         d.stateId = target.stateId;
         return true;
       } catch (e) {
         putBack();
-        await this.installDoc(d, d.id, [...d.rot], cur.current, cur.selected).catch(() => {});
+        await this.installDoc(d, d.id, [...d.rot], cur.current, cur.selected, cur.cids).catch(() => {});
         this.pagesNotice = { kind: 'error', text: `${label}에 실패했습니다.`, reassure: '문서는 그대로입니다.', detail: errText(e) };
         return false;
       }
@@ -858,14 +872,22 @@ export class Workspace {
         this.opBusy = false;
         return { ok: false };
       }
+      // 바뀌는 쪽의 내용 id 를 편집 앞뒤로 새로 준다: 편집 도중에 끝난 렌더가 옛 id(되돌리기 스냅샷이 가리킨다)나
+      // 편집 뒤의 id 로 캐시에 들어가 다른 내용의 그림이 재사용되는 일이 없게 한다
+      const bump = () => {
+        for (const p of pages) if (p >= 0 && p < d.rev.length) d.cids[p] = newCid();
+      };
+      bump();
       try {
         const value = await fn(c, d);
         this.pushHistory(d, { ...snap, pages: [...pages] });
+        bump();
         for (const p of pages) if (p >= 0 && p < d.rev.length) d.rev[p]++;
         return { ok: true, value };
       } catch (e) {
         try {
           await this.swapLive(c, d, snap.bytes);
+          bump();
           for (const p of pages) if (p >= 0 && p < d.rev.length) d.rev[p]++;
           this.editNotice = { kind: 'error', text: `${what}에 실패했습니다. 다시 시도해 주세요.`, reassure: '문서는 편집 전 상태 그대로입니다.', detail: errText(e) };
         } catch (e2) {
@@ -901,6 +923,7 @@ export class Workspace {
       const inv = new Map(order.map((o, p) => [o, p]));
       return {
         rot: order.map((o) => dd.rot[o]),
+        cids: order.map((o) => dd.cids[o]),
         current: inv.get(cur) ?? cur,
         selected: sel.map((s) => inv.get(s)!).sort((a, b) => a - b),
       };
@@ -915,13 +938,15 @@ export class Workspace {
     const sel = [...d.selected];
     void this.runOp('쪽 회전', async (c, dd) => {
       const rot = [...dd.rot];
+      const cids = [...dd.cids];
+      for (const i of list) cids[i] = newCid();
       for (const i of list) {
         const base = rot[i] ?? (await detectRotation(c, dd.id, i));
         const next = addRotation(base);
         await c.rotatePage(dd.id, i, next);
         rot[i] = next;
       }
-      return { rot, current: cur, selected: sel };
+      return { rot, cids, current: cur, selected: sel };
     });
   }
 
@@ -943,6 +968,7 @@ export class Workspace {
       dd.deletedAny = true;
       return {
         rot: dd.rot.filter((_, i) => !gone.has(i)),
+        cids: dd.cids.filter((_, i) => !gone.has(i)),
         current: currentAfterDelete(cur, list, total - list.length),
         selected: sel,
       };
@@ -968,7 +994,10 @@ export class Workspace {
     }
     const rot = [...d.rot];
     rot.splice(at, 0, ...list.map((i) => rot[i]));
-    return { rot, current: cur >= at ? cur + list.length : cur, selected: range(at, list.length) };
+    // 복제한 쪽은 원본과 그림이 같으므로 같은 내용 id 를 쓴다
+    const cids = [...d.cids];
+    cids.splice(at, 0, ...list.map((i) => cids[i]));
+    return { rot, cids, current: cur >= at ? cur + list.length : cur, selected: range(at, list.length) };
   }
 
   // ---------- 추출·분할 ----------
@@ -1133,7 +1162,7 @@ export class Workspace {
           return await this.applyOp(S, '쪽 옮기기', async (c, dd) => {
             await applyOrder(c, dd.id, order);
             const inv = new Map(order.map((o, p) => [o, p]));
-            return { rot: order.map((o) => dd.rot[o]), current: inv.get(cur) ?? cur, selected: sel.map((s) => inv.get(s)!).sort((a, b) => a - b) };
+            return { rot: order.map((o) => dd.rot[o]), cids: order.map((o) => dd.cids[o]), current: inv.get(cur) ?? cur, selected: sel.map((s) => inv.get(s)!).sort((a, b) => a - b) };
           });
         }
         const ok = await this.applyOp(S, '쪽 복제', (c, dd, snap) => this.copyWithin(c, dd, snap, pages, at));
@@ -1176,7 +1205,9 @@ export class Workspace {
           }
           const rot = [...dd.rot];
           rot.splice(at, 0, ...srcRot);
-          return { rot, current: curT >= at ? curT + pages.length : curT, selected: range(at, pages.length) };
+          const cids = [...dd.cids];
+          cids.splice(at, 0, ...freshCids(pages.length));
+          return { rot, cids, current: curT >= at ? curT + pages.length : curT, selected: range(at, pages.length) };
         },
         bundle,
       );
@@ -1402,7 +1433,7 @@ export class Workspace {
       async (c, dd) => {
         await c.deletePages(dd.id, pages);
         dd.deletedAny = true;
-        return { rot: dd.rot.filter((_, i) => !gone.has(i)), current: currentAfterDelete(cur, pages, total - pages.length), selected: [] };
+        return { rot: dd.rot.filter((_, i) => !gone.has(i)), cids: dd.cids.filter((_, i) => !gone.has(i)), current: currentAfterDelete(cur, pages, total - pages.length), selected: [] };
       },
       bundle,
     );

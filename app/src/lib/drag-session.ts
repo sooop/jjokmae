@@ -73,6 +73,8 @@ export class DragSession<S> {
   active = false;
   pt: Pt = { x: 0, y: 0 };
   edgeV = 0;
+  /** Shift 를 누르고 있는가: 다른 파일 위에 놓을 때 복사 대신 이동한다 */
+  shift = false;
   ghost: DragGhost | null = null;
   private moving: number[] = [];
   private startToken = '';
@@ -103,7 +105,9 @@ export class DragSession<S> {
     this.press = { x: e.clientX, y: e.clientY, index, handle, id: e.pointerId, mouse: e.pointerType === 'mouse' };
     this.startToken = this.hooks.token();
     this.pt = { x: e.clientX, y: e.clientY };
+    this.shift = e.shiftKey;
     holdGesture(this);
+    window.addEventListener('keyup', this.onKeyUp, true);
     window.addEventListener('pointermove', this.onMove);
     window.addEventListener('pointerup', this.onUp);
     window.addEventListener('pointercancel', this.onCancel);
@@ -124,6 +128,7 @@ export class DragSession<S> {
       return;
     }
     this.pt = { x: e.clientX, y: e.clientY };
+    this.shift = e.shiftKey;
     if (!this.active) {
       if (!p.handle && Math.hypot(e.clientX - p.x, e.clientY - p.y) < 5) return;
       this.hooks.onDragStart?.();
@@ -193,6 +198,7 @@ export class DragSession<S> {
       this.end('abort');
       return;
     }
+    this.shift = e.shiftKey;
     this.hooks.update();
     this.suppressClick();
     const snap = this.hooks.snapshot();
@@ -211,8 +217,17 @@ export class DragSession<S> {
       e.stopPropagation();
       this.suppressClick();
       this.end('cancel');
-    }
+    } else if (e.key === 'Shift') this.setShift(true);
   };
+  private onKeyUp = (e: KeyboardEvent) => {
+    if (e.key === 'Shift') this.setShift(false);
+  };
+  /** 끄는 중에 Shift 를 누르거나 떼면 고스트 설명(복사 ↔ 이동)을 바로 바꾼다 */
+  private setShift(on: boolean) {
+    if (this.shift === on) return;
+    this.shift = on;
+    if (this.active) this.hooks.update();
+  }
 
   /** 끌기를 끝낸다. 취소면 고스트가 원래 자리로 되돌아가고, 중단(abort)이면 바로 사라진다 */
   private end(mode: EndMode) {
@@ -220,6 +235,7 @@ export class DragSession<S> {
     window.removeEventListener('pointerup', this.onUp);
     window.removeEventListener('pointercancel', this.onCancel);
     window.removeEventListener('keydown', this.onKey, true);
+    window.removeEventListener('keyup', this.onKeyUp, true);
     this.unwatch?.();
     this.unwatch = null;
     if (this.edgeRaf) cancelAnimationFrame(this.edgeRaf);
@@ -251,6 +267,7 @@ export class DragSession<S> {
     window.removeEventListener('pointerup', this.onUp);
     window.removeEventListener('pointercancel', this.onCancel);
     window.removeEventListener('keydown', this.onKey, true);
+    window.removeEventListener('keyup', this.onKeyUp, true);
     this.unwatch?.();
     this.unwatch = null;
     if (this.edgeRaf) cancelAnimationFrame(this.edgeRaf);

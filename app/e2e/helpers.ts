@@ -409,16 +409,47 @@ export class App {
   thumb(i: number) {
     return this.page.locator(`[data-thumb="${i}"]`);
   }
+  /**
+   * 썸네일 패널·본문 뷰어는 보이는 쪽 근처만 DOM 에 둔다. 멀리 있는 쪽을 다루기 전에 그 쪽이 만들어지도록 스크롤한다
+   * (이미 있으면 아무것도 하지 않는다).
+   */
+  async reveal(where: 'thumbs' | 'scroller', i: number) {
+    const attr = where === 'thumbs' ? 'thumb' : 'page';
+    // 그 화면이 없으면(정리 모드의 격자 등) 할 일이 없다
+    if (!(await this.page.locator(`[data-testid=${where}]`).count())) return;
+    if (await this.page.locator(`[data-testid=${where}] [data-${attr}="${i}"]`).count()) return;
+    await this.page.evaluate(
+      async ([id, at, idx]) => {
+        const sc = document.querySelector(`[data-testid=${id}]`) as HTMLElement | null;
+        if (!sc) return;
+        const n = Number(sc.dataset.pages) || 1;
+        const present = () => !!sc.querySelector(`[data-${at}="${idx}"]`);
+        const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        sc.scrollTop = (sc.scrollHeight * Number(idx)) / n;
+        await frame();
+        for (let k = 0; k < 80 && !present(); k++) {
+          const have = [...sc.querySelectorAll<HTMLElement>(`[data-${at}]`)].map((e) => Number(e.dataset[at as string]));
+          const lo = have.length ? Math.min(...have) : 0;
+          sc.scrollTop += (Number(idx) < lo ? -1 : 1) * sc.clientHeight * 0.8;
+          await frame();
+        }
+      },
+      [where, attr, i] as const,
+    );
+    await this.page.locator(`[data-testid=${where}] [data-${attr}="${i}"]`).waitFor({ state: 'attached' });
+  }
   thumbFace(i: number) {
     return this.page.getByRole('button', { name: new RegExp(`^${i + 1}쪽으로 이동`) });
   }
   async clickThumb(i: number, modifiers: ('Control' | 'Shift')[] = []) {
+    await this.reveal('thumbs', i);
     await this.thumb(i).scrollIntoViewIfNeeded();
     await this.thumbFace(i).click({ modifiers });
   }
   /** 썸네일 항목 버튼(회전·복제·삭제). 호버해야 보이는 UI 라 먼저 호버한다 */
   async thumbAction(i: number, what: 'rotate' | 'copy' | 'delete') {
     const label = { rotate: '시계 방향 90° 회전', copy: '뒤에 복제', delete: '삭제' }[what];
+    await this.reveal('thumbs', i);
     await this.thumb(i).scrollIntoViewIfNeeded();
     await this.thumb(i).hover();
     const btn = this.thumb(i).getByRole('button', { name: `${i + 1}쪽 ${label}` });
@@ -553,6 +584,12 @@ export class App {
   pageTool(name: string | RegExp) {
     return this.page.getByRole('toolbar', { name: '선택한 쪽 조작' }).getByRole('button', { name });
   }
+  /** 좁은 썸네일 패널에서 '더 보기' 메뉴로 옮겨진 쪽 도구 항목(메뉴를 열고 항목을 돌려준다) */
+  async pageToolMore(name: string | RegExp) {
+    await this.pageTool('선택한 쪽 조작 더 보기').click();
+    await expect(this.contextMenu()).toBeVisible();
+    return this.menuItem(name);
+  }
   selectionCountText() {
     return this.page.getByRole('toolbar', { name: '선택한 쪽 조작' }).getByRole('button', { name: /쪽 선택됨/ });
   }
@@ -640,6 +677,7 @@ export class App {
   }
   /** 쪽 공간(pt) → 화면 좌표. pw = 쪽 너비(pt) */
   async toClient(i: number, pw: number, x: number, y: number): Promise<Pt & { k: number }> {
+    await this.reveal('scroller', i);
     await this.slot(i).evaluate((e) => e.scrollIntoView({ block: 'start' }));
     await this.pageDrawn(i);
     const r = await this.slot(i).boundingBox();

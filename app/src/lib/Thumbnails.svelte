@@ -43,8 +43,8 @@
     onselect: (index: number, e: MouseEvent) => void;
     /** 드래그로 놓았을 때: moving 쪽들을 before 번 쪽 앞(n 이면 맨 끝)으로 */
     onreorder?: (moving: number[], before: number, starts?: Map<number, ScreenRect>) => void;
-    /** 위쪽 탭 위에 놓았을 때(마우스 전용): moving 쪽들을 그 탭의 문서로. rects 는 놓은 순간 고스트의 카드 자리 */
-    ontabdrop?: (moving: number[], tabKey: number, rects?: ScreenRect[]) => void;
+    /** 위쪽 탭 위에 놓았을 때(마우스 전용): moving 쪽들을 그 탭의 문서로 복사한다(move 면 이동: Shift 를 누른 채 놓음). rects 는 놓은 순간 고스트의 카드 자리 */
+    ontabdrop?: (moving: number[], tabKey: number, rects?: ScreenRect[], move?: boolean) => void;
     /** 드래그 상태 알림: 끌기 시작·이동 중에는 {over: 탭 key 또는 null}, 끝나면 null */
     ondragtab?: (state: { over: number | null } | null) => void;
     /** 항목별 아이콘 버튼 슬롯(ThumbItem 으로 전달) */
@@ -56,11 +56,35 @@
   const GAP = 10;
   const PAD = 10;
   const BUFFER = 3;
+  /** DOM 에 두는 칸: 렌더 창보다 앞뒤로 더 넉넉히(스크롤할 때 칸을 만드는 일이 눈에 띄지 않게) */
+  const DOM_BUFFER = 8;
 
   let scroller: HTMLDivElement;
   let dpr = $state(typeof devicePixelRatio === 'number' ? devicePixelRatio : 1);
   let winA = $state(0);
   let winB = $state(-1);
+  let domA = $state(0);
+  let domB = $state(-1);
+  /** 키보드 포커스가 있는 칸: 창 밖으로 스크롤해도 DOM 에 남긴다 */
+  let focusPin = $state(-1);
+  const rows = $derived.by(() => {
+    const n = sizes.length;
+    const out: number[] = [];
+    for (let i = Math.max(0, domA); i <= Math.min(n - 1, domB); i++) out.push(i);
+    if (focusPin >= 0 && focusPin < n && (focusPin < domA || focusPin > domB)) {
+      if (focusPin < domA) out.unshift(focusPin);
+      else out.push(focusPin);
+    }
+    return out;
+  });
+  function onFocusIn(e: FocusEvent) {
+    const el = (e.target as Element | null)?.closest?.('[data-thumb]') as HTMLElement | null;
+    focusPin = el ? Number(el.dataset.thumb) : -1;
+  }
+  function onFocusOut(e: FocusEvent) {
+    const to = e.relatedTarget as Element | null;
+    if (!to || !scroller?.contains(to)) focusPin = -1;
+  }
 
   const fit = $derived(sizes.map((s) => Math.min(boxW / s.width, BOX_H / s.height)));
   const settledW = settled(() => boxW, 240);
@@ -80,6 +104,10 @@
     const b = Math.min(sizes.length - 1, last + BUFFER);
     if (a !== winA) winA = a;
     if (b !== winB) winB = b;
+    const da = Math.max(0, first - DOM_BUFFER);
+    const db = Math.min(sizes.length - 1, last + DOM_BUFFER);
+    if (da !== domA) domA = da;
+    if (db !== domB) domB = db;
   }
 
   let raf = 0;
@@ -131,7 +159,7 @@
     return sizes.length;
   }
 
-  const session = new DragSession<{ before: number; tab: number | null }>({
+  const session: DragSession<{ before: number; tab: number | null; move: boolean }> = new DragSession({
     scroller: () => scroller,
     token: () => `${gen}:${stateId}`,
     edgeStep: 12,
@@ -144,9 +172,9 @@
     },
     label: () => ghostLabel(),
     update: () => updateDrag(),
-    snapshot: () => ({ before: drag!.before, tab: drag!.tab }),
-    drop: (moving, grabbed, rects, { before, tab }) => {
-      if (tab != null) ontabdrop?.(moving, tab, rects);
+    snapshot: () => ({ before: drag!.before, tab: drag!.tab, move: session.shift }),
+    drop: (moving, grabbed, rects, { before, tab, move }) => {
+      if (tab != null) ontabdrop?.(moving, tab, rects, move);
       else {
         const starts = new Map<number, ScreenRect>();
         const ord = [grabbed, ...moving.filter((m) => m !== grabbed)];
@@ -173,7 +201,7 @@
   function ghostLabel(): string {
     const d = drag;
     if (!d) return '';
-    return d.tab != null ? `${d.moving.length}쪽을 ‘${d.tabName}’ 끝에 복사` : d.moving.length > 1 ? `${d.moving.length}쪽 이동` : `${d.moving[0] + 1}쪽 이동`;
+    return d.tab != null ? `${d.moving.length}쪽을 ‘${d.tabName}’ 끝에 ${session.shift ? '이동' : '복사 · Shift 이동'}` : d.moving.length > 1 ? `${d.moving.length}쪽 이동` : `${d.moving[0] + 1}쪽 이동`;
   }
 
   function updateDrag() {
@@ -209,13 +237,15 @@
   // ---------- 쪽 이동 연출(FLIP) 호스트 ----------
   let flyLayer: HTMLDivElement | undefined = $state();
   let holding = $state(false);
-  let lay: { sizes: PageSize[]; box: number; tops: number[] } | null = null;
+  // 연출이 조작 전·후 배열로 번갈아 물으므로 배열별로 기억해 둔다(하나만 기억하면 물을 때마다 전체 배치를 다시 계산한다)
+  const lays = new WeakMap<PageSize[], { box: number; tops: number[] }>();
   function layoutOf(sz: PageSize[]) {
-    if (lay && lay.sizes === sz && lay.box === boxW) return lay.tops;
+    const lay = lays.get(sz);
+    if (lay && lay.box === boxW) return lay.tops;
     const bh = Math.round((boxW * 170) / 120);
     const hs = sz.map((s) => s.height * Math.min(boxW / s.width, bh / s.height) + LABEL);
     const tops = computeLayout(hs, GAP, PAD).tops;
-    lay = { sizes: sz, box: boxW, tops };
+    lays.set(sz, { box: boxW, tops });
     return tops;
   }
   const host: PageHost = {
@@ -255,11 +285,12 @@
   });
 </script>
 
-<div class="thumbs" class:holding class:dragging={!!drag} bind:this={scroller} onscroll={onScroll} role="list" aria-label="페이지 썸네일" data-testid="thumbs">
+<div class="thumbs" class:holding class:dragging={!!drag} bind:this={scroller} onscroll={onScroll} onfocusin={onFocusIn} onfocusout={onFocusOut} role="list" aria-label="페이지 썸네일" data-testid="thumbs" data-pages={sizes.length}>
   <div class="content" style:height="{layout.total}px">
     {#key gen}
-    {#each sizes as s, i (i)}
-      <div class="row" class:shifting={!!drag} role="listitem" style:top="{layout.tops[i]}px" style:height="{itemH[i]}px" style:transform={drag && drag.tab == null && (i === drag.before || i === drag.before - 1) ? `translateY(${i === drag.before ? 10 : -10}px)` : undefined}>
+    {#each rows as i (i)}
+      {@const s = sizes[i]}
+      <div class="row" class:shifting={!!drag} role="listitem" aria-setsize={sizes.length} aria-posinset={i + 1} style:top="{layout.tops[i]}px" style:height="{itemH[i]}px" style:transform={drag && drag.tab == null && (i === drag.before || i === drag.before - 1) ? `translateY(${i === drag.before ? 10 : -10}px)` : undefined}>
         <ThumbItem
           index={i}
           width={s.width * fit[i]}

@@ -9,6 +9,9 @@
   import { hasHangul, type Tool } from './lib/annot-geom';
   import { AnnotUi, type AnnotApi } from './lib/annot-ui.svelte';
   import EngineStatus from './lib/EngineStatus.svelte';
+  import { FindState } from './lib/find.svelte';
+  import FindBar from './lib/FindBar.svelte';
+  import FindMarks from './lib/FindMarks.svelte';
   import MergePopover from './lib/MergePopover.svelte';
   import Organize from './lib/Organize.svelte';
   import PageOverlay from './lib/PageOverlay.svelte';
@@ -420,6 +423,16 @@
     return m;
   });
 
+  /** 화면 밖이어도 DOM 에 남겨 둘 쪽: 양식 칸이 있는 쪽(Tab 이동·다음 칸 찾기)과 주석을 고른 쪽(편집 중인 상태) */
+  const pinnedPages = $derived.by(() => {
+    const s = new Set<number>();
+    formsByPage.forEach((f, i) => {
+      if (f.length) s.add(i);
+    });
+    if (ui.sel) s.add(ui.sel.page);
+    return [...s];
+  });
+
   /** 다음 양식 칸으로: 마지막에 있던 칸 다음, 없으면 지금 쪽부터 첫 칸 */
   function nextField() {
     const els = Array.from(document.querySelectorAll<HTMLElement>('[data-form-input]')).filter((el) => !(el as HTMLInputElement).disabled);
@@ -443,6 +456,61 @@
     if (t?.closest('[data-annot-hit],[data-annot-handle],[data-keep-selection],[data-form-input]')) return;
     ui.clearSelection();
   }
+
+  // ---------- 문서에서 찾기 ----------
+  const find = new FindState();
+  let findTimer = 0;
+  function openFind() {
+    if (!doc) return;
+    if (ws.mode !== 'view') ws.toggleMode();
+    find.show();
+  }
+  function closeFind() {
+    clearTimeout(findTimer);
+    find.close();
+  }
+  // 찾는 말·옵션·문서·문서 내용이 바뀌면 다시 찾는다(입력 중에는 잠깐 기다린다)
+  $effect(() => {
+    const d = ws.active;
+    const on = find.open && ws.mode === 'view';
+    void find.query;
+    void find.matchCase;
+    void d?.stateId;
+    void d?.gen;
+    if (!on || !d) return;
+    untrack(() => {
+      clearTimeout(findTimer);
+      findTimer = window.setTimeout(() => {
+        const q = find.query;
+        const matchCase = find.matchCase;
+        void find.run({
+          scope: `${d.key}:${d.gen}`,
+          total: d.total,
+          start: d.current,
+          search: (page) => ws.clientOf(d).searchPage(d.id, page, q, { matchCase }),
+        });
+      }, 160);
+    });
+    return () => clearTimeout(findTimer);
+  });
+  // 문서가 없어지거나 정리 모드로 가면 찾기를 닫는다
+  $effect(() => {
+    if (find.open && (!ws.active || ws.mode !== 'view')) untrack(closeFind);
+  });
+  // 현재 항목이 바뀌면 그 자리가 보이게 한다
+  $effect(() => {
+    const a = find.active;
+    if (!a) return;
+    untrack(() => {
+      const q = find.byPage.get(a.page)?.[a.k]?.[0];
+      if (!q) return;
+      const xs = [q[0], q[2], q[4], q[6]];
+      const ys = [q[1], q[3], q[5], q[7]];
+      const x = Math.min(...xs);
+      const y = Math.min(...ys);
+      viewer?.revealRect(a.page, { x, y, w: Math.max(...xs) - x, h: Math.max(...ys) - y });
+    });
+  });
 
   // ---------- 탭 ----------
   async function onConfirmClose(choice: 'save' | 'discard' | 'cancel') {
@@ -479,10 +547,10 @@
     void pa.send(ws, { from: d, pages: [...d.selected], mode, target });
   }
 
-  function onTabDrop(moving: number[], key: number, rects?: ScreenRect[]) {
+  function onTabDrop(moving: number[], key: number, rects?: ScreenRect[], move = false) {
     const d = doc;
     if (!d) return;
-    void pa.send(ws, { from: d, pages: moving, mode: 'copy', target: { type: 'doc', key, pos: 'end' } }, rects);
+    void pa.send(ws, { from: d, pages: moving, mode: move ? 'move' : 'copy', target: { type: 'doc', key, pos: 'end' } }, rects);
   }
 
   async function onMerge(keys: number[]) {
@@ -527,7 +595,7 @@
     const typing = !!t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
     // 쪽을 누르거나 끄는 중에는 구조를 바꾸는 단축키(되돌리기·탭 닫기·모드 전환·삭제 등)를 받지 않는다. Esc 는 끌기 쪽이 먼저 받아 취소한다
     if (gestureActive() && e.key !== 'Escape') {
-      if ((e.ctrlKey || e.metaKey) && !e.altKey && ['s', 'p', 'o', 'w', 'z', 'y', 'tab'].includes(e.key.toLowerCase())) e.preventDefault();
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && ['s', 'p', 'o', 'w', 'z', 'y', 'f', 'tab'].includes(e.key.toLowerCase())) e.preventDefault();
       return;
     }
     if ((e.ctrlKey || e.metaKey) && !e.altKey) {
@@ -539,6 +607,10 @@
         // 브라우저 기본 인쇄(화면 그대로 찍힘)를 막고 인쇄 대화상자를 연다
         e.preventDefault();
         openPrint();
+      } else if (k === 'f' && doc) {
+        // 브라우저 기본 찾기는 캔버스에 그린 글자를 찾지 못한다: 문서 찾기 줄을 연다
+        e.preventDefault();
+        openFind();
       } else if (k === 'o') {
         e.preventDefault();
         input.click();
@@ -558,6 +630,7 @@
       return;
     }
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === 'F3' && find.open) { e.preventDefault(); find.step(e.shiftKey ? -1 : 1); return; }
     if (typing || !doc) return;
     if (!e.shiftKey && e.key.toLowerCase() === 'g') { e.preventDefault(); void switchMode(); return; }
     if (ws.mode === 'organize') return; // 아래는 보기 모드 전용(도구·쪽 이동·확대). 정리 모드의 쪽 키는 격자가 맡는다
@@ -586,6 +659,10 @@
 <svelte:window
   onkeydown={onKey}
   onclick={onWindowClick}
+  onbeforeunload={(e) => {
+    // 저장하지 않은 문서가 있으면 새로고침·창 닫기 전에 브라우저가 한 번 묻게 한다
+    if (ws.docs.some((d) => d.dirty)) e.preventDefault();
+  }}
   ondragover={(e) => e.preventDefault()}
   ondrop={(e) => e.preventDefault()}
 />
@@ -598,6 +675,8 @@
 
 {#snippet pageOverlay(i: number, visible: boolean)}
   {#if doc && doc.sizes[i]}
+    {@const fh = find.open ? find.byPage.get(i) : undefined}
+    {#if fh}<FindMarks hits={fh} k={(doc.zoom * 96) / 72} active={find.active?.page === i ? find.active.k : -1} />{/if}
     <PageOverlay
       index={i}
       page={doc.sizes[i]}
@@ -892,6 +971,7 @@
               initialPage={d.current}
               initialScroll={d.scroll}
               rev={d.rev}
+              pinned={pinnedPages}
               overlay={pageOverlay}
               ondraw={(i, r) => (ui.drawn[i] = r)}
               onwheelzoom={onWheelZoom}
@@ -906,6 +986,9 @@
             </div>
             <button type="button" class="primary open" onclick={() => input.click()}>파일 열기</button>
           </div>
+        {/if}
+        {#if doc && find.open}
+          <FindBar {find} onstep={(dir) => find.step(dir)} onclose={closeFind} />
         {/if}
         {#if ws.status}
           <EngineStatus status={ws.status} ondismiss={() => (ws.status = null)} />

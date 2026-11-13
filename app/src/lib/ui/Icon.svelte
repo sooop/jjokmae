@@ -18,6 +18,7 @@
     | 'redo'
     | 'arrow-up'
     | 'arrow-down'
+    | 'more'
     | 'grip'
     | 'scissors'
     | 'merge'
@@ -55,6 +56,7 @@
     redo: 'M15 14l5-5-5-5M20 9H10a6 6 0 0 0 0 12h3',
     'arrow-up': 'M12 19V5M5 12l7-7 7 7',
     'arrow-down': 'M12 5v14M19 12l-7 7-7-7',
+    more: 'M5 12h.01M12 12h.01M19 12h.01',
     grip: 'M9 6h.01M9 12h.01M9 18h.01M15 6h.01M15 12h.01M15 18h.01',
     scissors: 'M6 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM20 4L8.1 15.9M14.5 14.5L20 20M8.1 8.1L12 12',
     merge: 'M5 4v6a4 4 0 0 0 4 4h10M5 20v-6M15 10l4 4-4 4',

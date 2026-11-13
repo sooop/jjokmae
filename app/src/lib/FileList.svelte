@@ -268,7 +268,7 @@
     class:droppable={dragging}
     class:over={dragOver === 'new'}
     role="note"
-    title="쪽을 끌어다 놓으면 그 쪽만 든 새 파일이 만들어집니다"
+    title="쪽을 끌어다 놓으면 그 쪽만 든 새 파일이 만들어집니다 (Shift 를 누른 채 놓으면 복사가 아니라 이동)"
     data-new-file=""
     data-tab-name="새 파일"
     data-droppable={dragging ? '' : undefined}

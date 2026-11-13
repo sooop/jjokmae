@@ -1,4 +1,6 @@
 // 엔진 어댑터 인터페이스. UI 는 이 인터페이스만 안다. (작업지시서 '방침')
+import type { SearchOptions } from './text-search';
+export type { SearchOptions };
 
 export type DocId = string;
 export type Rotation = 0 | 90 | 180 | 270;
@@ -147,6 +149,11 @@ export interface EngineAdapter {
   textQuads(doc: DocId, pageIndex: number, from: PagePoint, to: PagePoint): Promise<number[][]>;
   /** 쪽의 텍스트 전체(디버그·시험용) */
   pageText(doc: DocId, pageIndex: number): Promise<string>;
+  /**
+   * 쪽에서 찾는 말이 나오는 곳을 읽기 순서대로 돌려준다. 일치마다 줄 단위 quad 목록(textQuads 와 같은 모양)이다.
+   * 공백은 하나로 보고, 줄이 바뀌는 곳은 공백이 있어도 없어도 맞는다. 글자가 없으면(스캔본) 빈 배열
+   */
+  searchPage(doc: DocId, pageIndex: number, needle: string, opts?: SearchOptions): Promise<number[][][]>;
 
   // 양식
   listFormFields(doc: DocId): Promise<FormField[]>;

@@ -58,7 +58,7 @@ test.describe('설정: 저장과 복원', () => {
     await app.goto();
     await app.open(G.five);
     expect(await app.zoomValue()).toBe(1);
-    expect(await sideWidth(app)).toBe(176);
+    expect(await sideWidth(app)).toBe(208);
   });
 
   test('범위를 벗어난 값은 허용 범위로 맞춘다', async ({ app }) => {
@@ -114,15 +114,15 @@ test.describe('설정: 보기 모드 썸네일 패널 폭', () => {
     await app.goto();
     await app.open(G.five);
     const sep = page.getByRole('separator', { name: '썸네일 패널 폭 조절' });
-    expect(await sideWidth(app)).toBe(176);
-    expect(await sep.evaluate((s) => [s.getAttribute('aria-orientation'), s.getAttribute('aria-valuenow'), s.getAttribute('aria-valuemin'), s.getAttribute('aria-valuemax'), (s as HTMLElement).tabIndex])).toEqual(['vertical', '176', '100', '280', 0]);
+    expect(await sideWidth(app)).toBe(208);
+    expect(await sep.evaluate((s) => [s.getAttribute('aria-orientation'), s.getAttribute('aria-valuenow'), s.getAttribute('aria-valuemin'), s.getAttribute('aria-valuemax'), (s as HTMLElement).tabIndex])).toEqual(['vertical', '208', '100', '280', 0]);
     const f0 = (await app.thumbFace(0).boundingBox())!.width;
-    // 끌어서 +90
+    // 끌어서 +50
     const c = await app.center(sep);
-    await app.dragMouse(c, { x: c.x + 90, y: c.y }, { steps: 10 });
-    await expect.poll(() => sideWidth(app)).toBeGreaterThanOrEqual(264);
-    expect(await sideWidth(app)).toBeLessThanOrEqual(268);
-    expect((await app.thumbFace(0).boundingBox())!.width).toBeGreaterThan(f0 + 60); // 썸네일이 폭에 맞춰 커짐
+    await app.dragMouse(c, { x: c.x + 50, y: c.y }, { steps: 10 });
+    await expect.poll(() => sideWidth(app)).toBeGreaterThanOrEqual(256);
+    expect(await sideWidth(app)).toBeLessThanOrEqual(260);
+    expect((await app.thumbFace(0).boundingBox())!.width).toBeGreaterThan(f0 + 30); // 썸네일이 폭에 맞춰 커짐
     // 상한·하한
     let p = await app.center(sep);
     await app.dragMouse(p, { x: 900, y: p.y }, { steps: 6 });
@@ -165,7 +165,7 @@ test.describe('설정: 보기 모드 썸네일 패널 폭', () => {
     // 더블클릭 → 기본 폭
     const c2 = await app.center(sep);
     await page.mouse.dblclick(c2.x, c2.y + 100);
-    await expect.poll(() => sideWidth(app)).toBe(176);
+    await expect.poll(() => sideWidth(app)).toBe(208);
     // 서랍 슬라이더
     const drawer = await app.openSettings();
     await drawer.getByRole('slider', { name: /보기 모드 썸네일 패널 폭/ }).fill('240');

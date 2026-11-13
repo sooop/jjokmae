@@ -31,7 +31,7 @@ export const SIDE_MIN = 100;
 export const SIDE_MAX = 280;
 
 const KEY = 'pdf-edit:settings';
-export const defaultSettings: Settings = { engine: 'mupdf', zoom: 1, flatten: false, incremental: true, garbageCollect: false, theme: 'system', mode: 'view', gridThumb: 160, sideWidth: 176, printMethod: 'auto', printDpi: 200 };
+export const defaultSettings: Settings = { engine: 'mupdf', zoom: 1, flatten: false, incremental: true, garbageCollect: false, theme: 'system', mode: 'view', gridThumb: 160, sideWidth: 208, printMethod: 'auto', printDpi: 200 };
 
 export const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 100) / 100));
 

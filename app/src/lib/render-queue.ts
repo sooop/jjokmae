@@ -78,13 +78,26 @@ export class RenderScheduler {
   private doc: DocId;
   private maxInFlight: number;
   private onError?: (e: unknown) => void;
+  private keyOf?: (index: number) => number | null | undefined;
 
   // 주의: erasable 문법만 쓴다(Node 타입 스트리핑으로 시험에서 직접 import) — 생성자 매개변수 속성 금지
-  constructor(adapter: Pick<EngineAdapter, 'renderPage'>, doc: DocId, maxInFlight = 2, onError?: (e: unknown) => void) {
+  constructor(
+    adapter: Pick<EngineAdapter, 'renderPage'>,
+    doc: DocId,
+    maxInFlight = 2,
+    onError?: (e: unknown) => void,
+    keyOf?: (index: number) => number | null | undefined,
+  ) {
     this.adapter = adapter;
     this.doc = doc;
     this.maxInFlight = maxInFlight;
     this.onError = onError;
+    this.keyOf = keyOf;
+  }
+
+  /** 쪽의 내용 id(비트맵 캐시 열쇠). 모르면 null: 그 쪽은 캐시를 쓰지 않는다 */
+  cacheKey(index: number): number | null {
+    return this.keyOf?.(index) ?? null;
   }
 
   request(index: number, scale: number, priority: () => number): RenderJob {

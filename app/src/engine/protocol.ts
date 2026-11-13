@@ -20,6 +20,7 @@ export const ADAPTER_METHODS = [
   'deleteAnnotation',
   'textQuads',
   'pageText',
+  'searchPage',
   'listFormFields',
   'setFormFieldValue',
   'save',

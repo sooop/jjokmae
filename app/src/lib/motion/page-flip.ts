@@ -7,7 +7,6 @@ import type { PageSize } from '../../engine/adapter';
 import { recordPlan, type Plan, type PlanEntry } from './plan';
 export { duplicatePlan, invertPlan, noteState, planFor, removePlan, reorderPlan, rotatePlan } from './plan';
 export type { Plan, PlanEntry } from './plan';
-import { stats } from '../render-queue';
 import { EASE, pulse, reduced, springOf } from './index';
 import type { ScreenRect } from './drag-ghost';
 
@@ -46,6 +45,8 @@ export function registerHost(h: PageHost): () => void {
 interface Flyer {
   el: HTMLDivElement;
   anim: Animation | null;
+  /** 내려앉는 자리의 조작 후 쪽 번호(사라지는 쪽은 null) */
+  to: number | null;
 }
 interface Active {
   flyers: Flyer[];
@@ -53,7 +54,7 @@ interface Active {
   h: PageHost;
   landed: boolean;
   updated: boolean;
-  drawsAt: number;
+  updatedAt: number;
   timer: number;
   settle: number;
   t0: number;
@@ -82,19 +83,23 @@ export function notifyUpdated() {
   const a = active;
   if (!a || a.updated) return;
   a.updated = true;
-  a.drawsAt = stats.draws;
+  a.updatedAt = performance.now();
   maybeRelease();
 }
 
 function maybeRelease() {
   const a = active;
   if (!a || !a.landed || !a.updated) return;
-  // 새 렌더가 몇 장 도착하거나(작은 문서는 바로) 잠깐 기다린 뒤 비행체를 넘겨 준다
-  const need = Math.min(a.flyers.length, 6);
-  const ready = stats.draws - a.drawsAt >= need || performance.now() - a.t0 > 1500;
-  if (!ready) {
+  // 비행체가 덮고 있는 새 칸이 모두 그려진 뒤에 넘겨 준다. 그려지기 전에 넘기면 쪽이 빈 칸으로 사라졌다가 다시 나타난다
+  // (그린 장수로 세면 같은 문서의 본문 뷰어가 그린 것까지 세어져 너무 일찍 넘긴다). 오래 걸리면 기다리지 않는다.
+  const drawn = a.flyers.every((f) => {
+    if (f.to == null) return true;
+    const cv = a.h.canvas(f.to);
+    return !cv || cv.width > 0;
+  });
+  if (!drawn && performance.now() - a.updatedAt < 2000) {
     clearTimeout(a.settle);
-    a.settle = window.setTimeout(maybeRelease, 60);
+    a.settle = window.setTimeout(maybeRelease, 40);
     return;
   }
   const cur = a;
@@ -186,7 +191,7 @@ export function run(plan: Plan, o: RunOpts = {}, ctx?: { docKey: number; stateId
   h.setHolding(true);
   const flyers: Flyer[] = [];
   let pending = 0;
-  const act: Active = { flyers, layer, h, landed: false, updated: false, drawsAt: 0, timer: 0, settle: 0, t0: performance.now() };
+  const act: Active = { flyers, layer, h, landed: false, updated: false, updatedAt: 0, timer: 0, settle: 0, t0: performance.now() };
   active = act;
 
   jobs.forEach((j, n) => {
@@ -198,7 +203,7 @@ export function run(plan: Plan, o: RunOpts = {}, ctx?: { docKey: number; stateId
     const el = makeFlyer(layer, w0, h0, j.src, j.checked, j.lifted, !still);
     if (still) {
       el.style.transform = tf(j.b!, w0, h0, 0, 1);
-      flyers.push({ el, anim: null });
+      flyers.push({ el, anim: null, to: j.e.to });
       return;
     }
     const rot = j.e.rot ?? 0;
@@ -246,7 +251,7 @@ export function run(plan: Plan, o: RunOpts = {}, ctx?: { docKey: number; stateId
     };
     anim.onfinish = done;
     anim.oncancel = () => {};
-    flyers.push({ el, anim });
+    flyers.push({ el, anim, to: j.b ? j.e.to : null });
   });
 
   if (pending === 0) act.landed = true; // 움직일 것이 하나도 없으면 새 화면만 기다린다

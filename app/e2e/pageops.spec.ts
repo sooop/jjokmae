@@ -6,7 +6,8 @@ const initial = FIVE.map((p) => `${p.text}:${p.rotate ?? 0}`).join(',');
 
 test.describe('쪽 조작', () => {
   test('회전·재정렬·복제·다중 선택·삭제를 하고 저장하면 쪽 순서·회전·크기가 맞고, 되돌리기·다시하기로 왕복한다', async ({ app, page }) => {
-    await app.goto();
+    // 다섯 쪽의 썸네일이 한 화면에 들어오도록 패널 폭을 고정한다(끌기 좌표가 화면 안이어야 한다)
+    await app.goto({ sideWidth: 176 });
     await app.open(G.five);
     const model = FIVE.map((p) => ({ id: p.text, rot: p.rotate ?? 0 }));
     const expectBrief = () => model.map((m) => `${m.id}:${m.rot}`).join(',');
