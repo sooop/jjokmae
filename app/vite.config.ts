@@ -108,10 +108,26 @@ function engineWorkerCode(target: Target): Plugin {
   };
 }
 
+/** single 전용: vite-plugin-singlefile 이 <link rel="icon"> 은 인라인하지 않으므로 favicon 을 data URI 로 바꿔 넣는다. */
+function inlineFavicon(): Plugin {
+  return {
+    name: 'inline-favicon',
+    transformIndexHtml: {
+      order: 'pre',
+      handler(html) {
+        return html.replace(/(<link rel="(?:icon|apple-touch-icon)"[^>]*?href=")(\/src\/assets\/[^"]+\.png)(")/g, (_m, a, path: string, c) => {
+          const b64 = readFileSync(join(root, path)).toString('base64');
+          return `${a}data:image/png;base64,${b64}${c}`;
+        });
+      },
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   const target: Target = mode === 'static' || mode === 'single' ? mode : 'dev';
   const plugins: PluginOption[] = [svelte(), mupdfNoWasmAsset(), engineWorkerCode(target), engineBinaries(target)];
-  if (target === 'single') plugins.push(viteSingleFile());
+  if (target === 'single') plugins.push(inlineFavicon(), viteSingleFile());
 
   return {
     base: target === 'dev' ? '/' : './',

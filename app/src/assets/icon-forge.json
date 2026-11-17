@@ -1,0 +1,30 @@
+{
+  "format": "icon-forge",
+  "version": 1,
+  "settings": {
+    "icon": "FileStack",
+    "strokeColor": "#ffffff",
+    "strokeWidth": 2,
+    "autoStroke": true,
+    "bgShape": "square",
+    "bgColor": "#d7141e",
+    "bgColor2": "#9f0f16",
+    "bgGradient": true,
+    "bgRadius": 22,
+    "padding": 8,
+    "shadow": false,
+    "softenSmall": true,
+    "customSizes": [
+      24,
+      64,
+      256
+    ]
+  },
+  "selection": {
+    "extension": false,
+    "favicon": true,
+    "pwa": false,
+    "apple": false,
+    "custom": false
+  }
+}
