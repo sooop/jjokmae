@@ -83,3 +83,16 @@ export interface MergeDoc {
   name: string;
   total: number;
 }
+
+/**
+ * 배열에서 from 번째 항목을 꺼내 toIndex 자리(꺼낸 뒤 배열 기준)로 옮긴 새 배열을 돌려준다.
+ * toIndex 는 0..length-1 로 보정한다. from 이 범위 밖이면 그대로 복사해 돌려준다.
+ */
+export function moveItem<T>(list: readonly T[], from: number, toIndex: number): T[] {
+  const out = [...list];
+  if (!Number.isInteger(from) || from < 0 || from >= out.length) return out;
+  const to = Math.max(0, Math.min(out.length - 1, Math.trunc(Number.isFinite(toIndex) ? toIndex : from)));
+  const [it] = out.splice(from, 1);
+  out.splice(to, 0, it);
+  return out;
+}

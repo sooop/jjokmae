@@ -441,23 +441,54 @@ export class App {
   thumbFace(i: number) {
     return this.page.getByRole('button', { name: new RegExp(`^${i + 1}쪽으로 이동`) });
   }
+  /** 선택이 하나라도 있으면(선택 모드) Esc 로 풀어 일반 클릭이 '이동'이 되게 한다 */
+  async clearSelectionByEsc() {
+    if ((await this.selectedPages()).length) {
+      await this.page.keyboard.press('Escape');
+      await expect.poll(() => this.selectedPages()).toEqual([]);
+    }
+  }
+  /**
+   * 썸네일 클릭. 수정자 없이 부르면 '그 쪽으로 이동하고 그 쪽만 선택'(예전 일반 클릭의 결과)을 한다:
+   * 선택 모드면 Esc 로 풀고, 얼굴을 눌러 이동한 뒤, 체크박스로 그 쪽을 고른다.
+   * 일반 클릭 자체(이동만, 선택 안 함)를 시험할 때는 thumbFace(i).click() 을 직접 쓴다.
+   */
   async clickThumb(i: number, modifiers: ('Control' | 'Shift')[] = []) {
     await this.reveal('thumbs', i);
     await this.thumb(i).scrollIntoViewIfNeeded();
-    await this.thumbFace(i).click({ modifiers });
+    if (modifiers.length) {
+      await this.thumbFace(i).click({ modifiers });
+      return;
+    }
+    await this.clearSelectionByEsc();
+    await this.thumbFace(i).click();
+    await this.pageCheckbox(i).click();
   }
-  /** 썸네일 항목 버튼(회전·복제·삭제). 호버해야 보이는 UI 라 먼저 호버한다 */
-  async thumbAction(i: number, what: 'rotate' | 'copy' | 'delete') {
-    const label = { rotate: '시계 방향 90° 회전', copy: '뒤에 복제', delete: '삭제' }[what];
+  /** 썸네일을 우클릭해 쪽 메뉴를 연다(선택이 있는 칸이면 선택 전체가 대상) */
+  async openThumbMenu(i: number) {
     await this.reveal('thumbs', i);
     await this.thumb(i).scrollIntoViewIfNeeded();
-    await this.thumb(i).hover();
-    const btn = this.thumb(i).getByRole('button', { name: `${i + 1}쪽 ${label}` });
-    await btn.click();
+    await this.thumbFace(i).click({ button: 'right' });
+    await expect(this.contextMenu()).toBeVisible();
   }
-  thumbActionButton(i: number, what: 'rotate' | 'copy' | 'delete') {
-    const label = { rotate: '시계 방향 90° 회전', copy: '뒤에 복제', delete: '삭제' }[what];
-    return this.thumb(i).getByRole('button', { name: `${i + 1}쪽 ${label}` });
+  /** 쪽 메뉴 항목(회전·복제·삭제). 호버 단추 줄은 없어지고 우클릭 메뉴로 통합됐다 */
+  thumbMenuItem(what: 'rotate' | 'rotate-left' | 'copy' | 'delete') {
+    const label = { rotate: /오른쪽으로 회전$/, 'rotate-left': /왼쪽으로 회전$/, copy: /쪽 복제$/, delete: /쪽 삭제$/ }[what];
+    return this.contextMenu().getByRole('menuitem', { name: label });
+  }
+  /** 썸네일을 우클릭해 메뉴에서 회전(시계 방향)·복제·삭제를 고른다 */
+  async thumbAction(i: number, what: 'rotate' | 'rotate-left' | 'copy' | 'delete') {
+    await this.openThumbMenu(i);
+    await this.thumbMenuItem(what).click();
+  }
+  /** 썸네일 메뉴를 연 채 항목을 돌려준다(열려 있는 메뉴는 호출한 쪽이 Esc 로 닫는다) */
+  async thumbActionItem(i: number, what: 'rotate' | 'rotate-left' | 'copy' | 'delete') {
+    await this.openThumbMenu(i);
+    return this.thumbMenuItem(what);
+  }
+  /** 쪽 체크박스(썸네일 패널·격자 공통) */
+  pageCheckbox(i: number) {
+    return this.page.getByRole('checkbox', { name: `${i + 1}쪽 선택`, exact: true });
   }
   cell(i: number) {
     return this.page.locator(`[data-cell="${i}"]`);
@@ -465,8 +496,13 @@ export class App {
   cellFace(i: number) {
     return this.cell(i).getByRole('button', { name: /쪽으로 이동/ });
   }
+  /** 격자 칸 클릭. 수정자 없는 클릭은 선택 모드에서 '토글'이므로, 예전처럼 '그 칸만 선택'이 되도록 먼저 Esc 로 선택을 푼다 */
   async clickCell(i: number, modifiers: ('Control' | 'Shift')[] = [], clickCount = 1) {
     await this.cell(i).scrollIntoViewIfNeeded();
+    if (!modifiers.length) {
+      await this.page.getByTestId('grid').focus();
+      await this.clearSelectionByEsc();
+    }
     await this.cellFace(i).click({ modifiers, clickCount });
   }
   /** 정리 모드 왼쪽 파일 목록 */
@@ -632,12 +668,43 @@ export class App {
     await dl.saveAs(path);
     return { name: dl.suggestedFilename(), path, bytes: new Uint8Array(readFileSync(path)) };
   }
-  /** 저장 버튼(또는 Ctrl+S)으로 현재 문서를 받는다 */
-  async save(via: 'button' | 'ctrlS' = 'button'): Promise<SavedFile> {
+  /** 저장 파일 이름 확인 대화상자 */
+  saveDialog() {
+    return this.page.getByRole('dialog', { name: '저장 파일 이름' });
+  }
+  /** 저장 단추(또는 Ctrl+S)를 눌러 이름 확인 대화상자를 연다 */
+  async openSaveDialog(via: 'button' | 'ctrlS' = 'button') {
+    if (via === 'ctrlS') await this.page.keyboard.press('Control+s');
+    else await this.page.getByTestId('save').click();
+    const dlg = this.saveDialog();
+    await expect(dlg).toBeVisible();
+    return dlg;
+  }
+  /** 열려 있는 대화상자의 이름을 (name 이 있으면 바꿔) Enter 로 확정한다 */
+  async confirmSaveDialog(name?: string) {
+    const input = this.saveDialog().getByRole('textbox');
+    if (name != null) await input.fill(name);
+    await input.press('Enter');
+  }
+  /** 저장 단추(또는 Ctrl+S) → 이름 확인 대화상자에서 Enter 로 확정해 현재 문서를 받는다 */
+  async save(via: 'button' | 'ctrlS' = 'button', name?: string): Promise<SavedFile> {
     return this.download(async () => {
-      if (via === 'ctrlS') await this.page.keyboard.press('Control+s');
-      else await this.page.getByTestId('save').click();
+      await this.openSaveDialog(via);
+      await this.confirmSaveDialog(name);
     });
+  }
+  /** 탭 이름을 더블클릭(또는 F2)으로 바꾸기 시작한다. 입력칸을 돌려준다 */
+  async startRenameTab(name: string, via: 'dblclick' | 'f2' = 'dblclick') {
+    const tab = this.tab(name);
+    if (via === 'f2') {
+      await tab.focus();
+      await this.page.keyboard.press('F2');
+    } else {
+      await tab.dblclick();
+    }
+    const input = this.page.getByTestId('rename-input');
+    await expect(input).toBeFocused();
+    return input;
   }
   /** 저장해 qpdf 검사 + mupdf 로 쪽 요약까지 */
   async saveAndInspect(via: 'button' | 'ctrlS' = 'button') {
@@ -688,7 +755,14 @@ export class App {
   annotTool(name: string) {
     return this.page.getByRole('toolbar', { name: '주석 도구' }).getByRole('button', { name: new RegExp(`^${name}`) });
   }
+  /** 주석 도구 모음은 평소 접혀 있다: 접혀 있으면 상단 툴바의 토글로 펼친다 */
+  async openAnnotToolbar() {
+    const t = this.header().getByRole('button', { name: '주석 도구 모음' });
+    if ((await t.getAttribute('aria-pressed')) !== 'true') await t.click();
+    await expect(this.page.getByRole('toolbar', { name: '주석 도구' })).toBeVisible();
+  }
   async pickTool(name: string) {
+    await this.openAnnotToolbar();
     await this.annotTool(name).click();
     await expect(this.annotTool(name)).toHaveAttribute('aria-pressed', 'true');
   }

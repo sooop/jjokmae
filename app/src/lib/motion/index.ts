@@ -1,7 +1,7 @@
 // 앱 전체가 쓰는 모션 모듈: 모션 줄이기 판정, WAAPI 보조, Svelte 전환(팝오버·서랍·대화상자·탭), 액션.
 // 스프링 수학은 spring.ts, 쪽 이동 연출은 page-flip.ts, 드래그 고스트는 drag-ghost.ts.
 import type { Action } from 'svelte/action';
-import { cubicIn, DUR, EASE, solveSpring, SPRING, type SpringName, type SpringSpec } from './spring';
+import { cubicIn, cubicOut, DUR, EASE, solveSpring, SPRING, type SpringName, type SpringSpec } from './spring';
 
 export { DUR, EASE, SPRING, solveSpring, type SpringName, type SpringSpec };
 
@@ -89,6 +89,25 @@ export function scrimFade(_n: Element, { out = false }: { out?: boolean } = {}) 
   return { duration: out ? 140 : 240, css: (t: number) => `opacity:${t}` };
 }
 
+/** 모달 본체: 배율 0.95 에서 스프링으로 자란다(≈400ms). 닫힘은 130ms, 배율 0.97 까지만 */
+export function modalIn(_n: Element) {
+  if (reduced()) return { duration: 120, css: (t: number) => `opacity:${t}` };
+  const sp = solveSpring(SPRING.pop);
+  return { duration: sp.duration, easing: sp.fn, css: (t: number) => `opacity:${Math.min(1, Math.max(0, t) * 2.4)};transform:scale(${0.95 + 0.05 * t})` };
+}
+export function modalOut(_n: Element) {
+  if (reduced()) return { duration: 90, css: (t: number) => `opacity:${t}` };
+  return { duration: 130, easing: cubicIn, css: (t: number) => `opacity:${t};transform:scale(${0.97 + 0.03 * t})` };
+}
+/** 모달 배경(딤): 본체보다 110ms 늦게 400ms 동안 어두워지고, 닫힘은 140ms. 본체가 먼저 움직여 시선을 붙든다 */
+export function backdropIn(_n: Element) {
+  if (reduced()) return { duration: 120, css: (t: number) => `opacity:${t}` };
+  return { delay: 110, duration: 400, easing: (t: number) => 1 - Math.pow(1 - t, 3), css: (t: number) => `opacity:${t}` };
+}
+export function backdropOut(_n: Element) {
+  return { duration: reduced() ? 90 : 140, css: (t: number) => `opacity:${t}` };
+}
+
 /** 안내 카드: 앵커 쪽에서 살짝 떠오르며 등장, 퇴장은 빠르게 */
 export function noticeIn(_n: Element, { y = -8 }: { y?: number } = {}) {
   if (reduced()) return { duration: 120, css: (t: number) => `opacity:${t}` };
@@ -128,6 +147,18 @@ export function slideUpOut(_n: Element, { h = 52 }: { h?: number } = {}) {
   return { duration: 200, easing: EASE_IN_OUT_FN, css: (t: number) => `overflow:hidden;opacity:${t};max-height:${t * h}px;transform:scale(${0.94 + 0.06 * t})` };
 }
 
+/** 접기·펼치기(slide): 펼침 220ms ease-out, 접힘 200ms ease-in-out. 높이·투명도만 움직인다 */
+export function collapseIn(node: Element) {
+  if (reduced()) return { duration: 120, css: (t: number) => `opacity:${t}` };
+  const h = (node as HTMLElement).offsetHeight;
+  return { duration: 220, easing: (t: number) => 1 - Math.pow(1 - t, 3), css: (t: number) => `overflow:hidden;height:${t * h}px;opacity:${t}` };
+}
+export function collapseOut(node: Element) {
+  if (reduced()) return { duration: 90, css: (t: number) => `opacity:${t}` };
+  const h = (node as HTMLElement).offsetHeight;
+  return { duration: 200, easing: EASE_IN_OUT_FN, css: (t: number) => `overflow:hidden;height:${t * h}px;opacity:${t}` };
+}
+
 // ---------- 액션 ----------
 
 /** range 입력의 채움선 위치(--p)를 값에 맞춰 둔다. 값이 바뀔 때마다 param 으로 알린다 */
@@ -156,4 +187,42 @@ export function pulse(el: Element | null | undefined, strength = 1) {
   if (a) pulsing.set(el, a);
   el.setAttribute('data-pulse', '');
   setTimeout(() => el.removeAttribute('data-pulse'), 620);
+}
+
+// ---------- 보기 ↔ 정리 화면 전환 ----------
+// 나가는 요소는 자리를 비워 들어오는 화면이 바로 제자리를 잡게 한다(레이아웃이 밀리지 않게 절대 위치로 띄운다).
+function leaveInPlace(n: Element) {
+  const el = n as HTMLElement;
+  const par = el.offsetParent as HTMLElement | null;
+  if (!par) return;
+  const r = el.getBoundingClientRect();
+  const p = par.getBoundingClientRect();
+  el.style.position = 'absolute';
+  el.style.left = `${r.left - p.left + par.scrollLeft}px`;
+  el.style.top = `${r.top - p.top + par.scrollTop}px`;
+  el.style.width = `${r.width}px`;
+  el.style.height = `${r.height}px`;
+  el.style.margin = '0';
+  el.style.pointerEvents = 'none';
+  // 나가는 중에 다시 켜지면 Svelte 는 같은 요소를 되살린다: 그대로 두면 띄운 자리와 크기가 남으므로, 끝날 시간이 지나도 붙어 있으면 되돌린다
+  setTimeout(() => {
+    if (!el.isConnected) return;
+    for (const k of ['position', 'left', 'top', 'width', 'height', 'margin', 'pointer-events']) el.style.removeProperty(k);
+  }, 400);
+}
+/** 옆 패널이 들어온다: 들어오는 쪽에서 40px 미끄러지며 나타난다(220ms) */
+export function panelIn(_n: Element, { dx = -40 }: { dx?: number } = {}) {
+  if (reduced()) return { duration: 120, css: (t: number) => `opacity:${t}` };
+  return { duration: DUR.base, easing: cubicOut, css: (t: number) => `opacity:${t};transform:translateX(${(1 - t) * dx}px)` };
+}
+/** 옆 패널이 나간다: 나가는 쪽으로 40px 미끄러지며 사라진다(170ms) */
+export function panelOut(n: Element, { dx = -40 }: { dx?: number } = {}) {
+  leaveInPlace(n);
+  if (reduced()) return { duration: 90, css: (t: number) => `opacity:${t}` };
+  return { duration: 170, easing: cubicIn, css: (t: number) => `opacity:${t};transform:translateX(${(1 - t) * dx}px)` };
+}
+/** 화면 본체가 나간다: 이동 없이 빠르게 흐려진다(120ms) */
+export function softOut(n: Element) {
+  leaveInPlace(n);
+  return { duration: 120, easing: cubicIn, css: (t: number) => `opacity:${t}` };
 }

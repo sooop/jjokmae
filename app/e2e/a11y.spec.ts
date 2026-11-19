@@ -27,12 +27,13 @@ test.describe('접근성: 아이콘 단추', () => {
   test('보기 모드: 모든 아이콘 단추에 aria-label·title 이 있고 터치 대상이 28px 이상이다', async ({ app, page }) => {
     await app.goto();
     await app.open(G.five);
-    await app.thumb(0).hover(); // 호버해야 나타나는 항목 단추
-    await expect(app.thumbActionButton(0, 'rotate')).toBeVisible();
+    await app.thumb(0).hover(); // 호버해야 나타나는 체크박스
+    await expect(app.pageCheckbox(0)).toBeVisible();
     let r = await auditButtons(app);
     expect(r.bad, r.bad.join('\n')).toEqual([]);
     expect(r.small, r.small.join('\n')).toEqual([]);
     // 주석 도구 모음
+    await app.openAnnotToolbar();
     const tools = page.getByRole('toolbar', { name: '주석 도구' }).getByRole('button');
     expect(await tools.count()).toBeGreaterThanOrEqual(6);
     expect(await tools.evaluateAll((els) => els.every((x) => x.getAttribute('aria-label') && (x as HTMLElement).title === x.getAttribute('aria-label')))).toBe(true);
@@ -92,7 +93,7 @@ test.describe('접근성: 역할과 이름', () => {
     await expect(page.getByRole('separator', { name: '썸네일 패널 폭 조절' })).toHaveAttribute('aria-valuenow', '208');
     // 도구 모음
     await expect(page.getByRole('toolbar', { name: '선택한 쪽 조작' })).toBeVisible();
-    await expect(page.getByRole('toolbar', { name: '주석 도구' })).toBeVisible();
+    await app.openAnnotToolbar();
     // 썸네일 단추는 쪽 번호와 선택 상태를 이름·aria-pressed 로 알린다
     await app.clickThumb(1);
     await expect(page.getByRole('button', { name: '2쪽으로 이동 (선택됨)' })).toHaveAttribute('aria-pressed', 'true');
@@ -109,6 +110,11 @@ test.describe('접근성: 역할과 이름', () => {
     await page.keyboard.press('Escape');
     await app.saveOptions();
     await app.closeSaveOptions();
+    await app.openSaveDialog();
+    await expect(app.saveDialog()).toHaveAttribute('aria-modal', 'true');
+    await page.keyboard.press('Escape');
+    await expect(app.saveDialog()).toHaveCount(0);
+    await expect(page.getByTestId('save')).toBeFocused();
     await app.openSettings();
     await app.closeSettings();
     // 알림: 오류는 role=alert, 안내는 role=status
@@ -161,8 +167,11 @@ test.describe('접근성: 키보드만으로 주요 흐름', () => {
     await app.open(G.five);
     await page.locator('body').click({ position: { x: 5, y: 5 } }); // 포커스를 문서 처음으로
     await tabTo(app, /^2쪽으로 이동/);
-    await page.keyboard.press('Enter'); // 쪽 선택 + 이동
+    await page.keyboard.press('Enter'); // 이동(선택 모드가 아니므로 선택은 하지 않는다)
     await expect(app.currentPageInput()).toHaveValue('2');
+    await expect.poll(() => app.selectedPages()).toEqual([]);
+    await tabTo(app, /^2쪽 선택$/); // 다음 Tab 정지는 같은 칸의 체크박스
+    await page.keyboard.press('Space');
     await expect.poll(() => app.selectedPages()).toEqual([1]);
     // 거꾸로 Tab 해서 「선택한 쪽 회전」 단추에 닿아 누른다
     await tabTo(app, /^선택한 쪽 시계 방향 90° 회전$/, { back: true });
@@ -170,7 +179,11 @@ test.describe('접근성: 키보드만으로 주요 흐름', () => {
     expect((await app.doc('five.pdf')).undo).toBe(1);
     // 저장 단추까지 Tab 으로 이동해 Enter
     await tabTo(app, /^저장$/);
-    const saved = await app.download(() => page.keyboard.press('Enter'));
+    const saved = await app.download(async () => {
+      await page.keyboard.press('Enter'); // 이름 확인 대화상자가 열리고 포커스는 이름 입력칸에 있다
+      await expect(app.saveDialog().getByRole('textbox')).toBeFocused();
+      await page.keyboard.press('Enter'); // Enter = 저장
+    });
     expect(saved.name).toBe('five-편집.pdf');
     expect(saved.bytes.length).toBeGreaterThan(0);
   });

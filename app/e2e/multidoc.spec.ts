@@ -227,8 +227,10 @@ test.describe('다중 문서: 열린 파일 병합', () => {
     const counts = (await app.summary()).docs.map((d) => d.pages);
     let dlg = await app.openMerge();
     await expect(dlg.locator('[data-merge-row]')).toHaveCount(3);
-    // scan 을 한 칸 위로 → [embedded, scan, nonembedded]
-    await dlg.getByRole('button', { name: 'scan.pdf 위로' }).click();
+    // scan 을 한 칸 위로(행에서 Alt+↑) → [embedded, scan, nonembedded]
+    await dlg.getByRole('checkbox', { name: 'scan.pdf 포함' }).focus();
+    await page.keyboard.press('Alt+ArrowUp');
+    await expect(dlg.getByRole('status')).toContainText('scan.pdf, 3개 중 2번째');
     await expect(dlg.locator('[data-merge-row] label span')).toHaveText(['ko_embedded.pdf', 'scan.pdf', 'ko_nonembedded.pdf']);
     await app.change(() => dlg.getByTestId('merge-run').click());
     await expect.poll(() => app.tabNames()).toEqual(['ko_embedded.pdf', 'ko_nonembedded.pdf', 'scan.pdf', 'ko_embedded-병합.pdf']);
@@ -353,5 +355,166 @@ test.describe('다중 문서: 닫기 확인', () => {
     await expect.poll(async () => (await app.summary()).docs.length).toBe(0);
     await expect(page.getByRole('button', { name: '파일 열기' })).toBeVisible();
     expect((await app.summary()).engines).toEqual([]);
+  });
+});
+
+test.describe('다중 문서: 순서 바꾸기(끌기)', () => {
+  test('탭을 끌어 순서를 바꾼다: 문턱 전에는 클릭, Esc 는 취소, 활성 문서는 그대로', async ({ app, page }) => {
+    await app.goto();
+    await app.open([SAMPLES.koEmbedded, SAMPLES.koNonEmbedded, SAMPLES.scan]);
+    const before = await app.tabNames();
+    const active = await app.activeTabName();
+    const box = async (name: string) => (await app.tab(name).boundingBox())!;
+    // 문턱 전(3px)은 클릭: 순서 그대로, 그 탭이 활성
+    const b0 = await box(before[0]);
+    await page.mouse.move(b0.x + 30, b0.y + b0.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(b0.x + 33, b0.y + b0.height / 2);
+    await page.mouse.up();
+    expect(await app.tabNames()).toEqual(before);
+    expect(await app.activeTabName()).toBe(before[0]);
+    await app.tab(before[2]).click();
+    // Esc 취소
+    const b2 = await box(before[2]);
+    await page.mouse.move(b2.x + 30, b2.y + b2.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(b0.x + 20, b0.y + b0.height / 2, { steps: 8 });
+    await expect(page.getByTestId('sort-ghost')).toBeVisible();
+    await page.keyboard.press('Escape');
+    await app.releaseMouse();
+    await expect(page.getByTestId('sort-ghost')).toHaveCount(0);
+    expect(await app.tabNames()).toEqual(before);
+    // 마지막 탭을 맨 앞으로 끌어 놓기
+    const b2b = await box(before[2]);
+    await page.mouse.move(b2b.x + 30, b2b.y + b2b.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(b0.x + 10, b0.y + b0.height / 2, { steps: 10 });
+    await page.mouse.up();
+    await expect(page.getByTestId('sort-ghost')).toHaveCount(0);
+    expect(await app.tabNames()).toEqual([before[2], before[0], before[1]]);
+    expect(await app.activeTabName()).toBe(before[2]);
+    void active;
+    // 키보드 대안: Alt+→
+    await app.tab(before[2]).focus();
+    await page.keyboard.press('Alt+ArrowRight');
+    expect(await app.tabNames()).toEqual([before[0], before[2], before[1]]);
+  });
+
+  test('병합 목록 행을 끌어 순서를 바꾼다', async ({ app, page }) => {
+    await app.goto();
+    await app.open([SAMPLES.koEmbedded, SAMPLES.koNonEmbedded, SAMPLES.scan]);
+    const dlg = await app.openMerge();
+    const rows = dlg.locator('[data-merge-row]');
+    const last = (await rows.nth(2).boundingBox())!;
+    const first = (await rows.nth(0).boundingBox())!;
+    // 체크박스(x+30 부근)가 아닌 파일 이름 글자 위에서 잡는다
+    await page.mouse.move(last.x + 120, last.y + last.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(first.x + 120, first.y + 2, { steps: 10 });
+    await page.mouse.up();
+    await expect(page.getByTestId('sort-ghost')).toHaveCount(0);
+    await expect(dlg.locator('[data-merge-row] label span')).toHaveText(['scan.pdf', 'ko_embedded.pdf', 'ko_nonembedded.pdf']);
+    // 체크박스를 누르는 것은 끌기가 아니라 토글
+    await dlg.getByRole('checkbox', { name: 'scan.pdf 포함' }).click();
+    await expect(dlg.getByRole('checkbox', { name: 'scan.pdf 포함' })).not.toBeChecked();
+  });
+});
+
+test.describe('이름 변경: 탭·파일 목록의 이름을 더블클릭(F2)', () => {
+  test('탭 이름 더블클릭: 전체 선택, Enter 확정, 이후 저장은 -편집 없이 그 이름', async ({ app, page }) => {
+    await app.goto();
+    await app.open([G.docA, G.docB]);
+    const input = await app.startRenameTab('docA.pdf');
+    await expect(input).toHaveValue('docA.pdf');
+    expect(await input.evaluate((e: HTMLInputElement) => [e.selectionStart, e.selectionEnd])).toEqual([0, 'docA.pdf'.length]);
+    await input.fill('계약서:최종');
+    await input.press('Enter');
+    await expect(page.getByTestId('rename-input')).toHaveCount(0);
+    expect(await app.tabNames()).toEqual(['계약서최종.pdf', 'docB.pdf']);
+    await expect(app.tab('계약서최종.pdf')).toBeFocused(); // 키보드로 끝냈으면 탭으로 포커스가 돌아온다
+    expect(await app.activeTabName()).toBe('계약서최종.pdf'); // 더블클릭의 첫 클릭이 활성화했다
+    // 저장 대화상자의 기본값과 내려받는 이름이 새 이름이다(-편집 없음)
+    const dlg = await app.openSaveDialog();
+    await expect(dlg.getByRole('textbox')).toHaveValue('계약서최종.pdf');
+    const f = await app.download(() => app.confirmSaveDialog());
+    expect(f.name).toBe('계약서최종.pdf');
+  });
+
+  test('Esc 는 취소, 빈 값·그대로인 값도 취소, 조합 중 Enter 는 무시, blur 는 확정', async ({ app, page }) => {
+    await app.goto();
+    await app.open([G.docA, G.docB]);
+    let input = await app.startRenameTab('docB.pdf');
+    await input.fill('바꾸다');
+    await input.press('Escape');
+    await expect(page.getByTestId('rename-input')).toHaveCount(0);
+    expect(await app.tabNames()).toEqual(['docA.pdf', 'docB.pdf']);
+    input = await app.startRenameTab('docB.pdf');
+    await input.fill('  ');
+    await input.press('Enter');
+    expect(await app.tabNames()).toEqual(['docA.pdf', 'docB.pdf']);
+    input = await app.startRenameTab('docB.pdf', 'f2'); // F2 도 같은 동작
+    await input.press('Enter'); // 그대로
+    expect(await app.tabNames()).toEqual(['docA.pdf', 'docB.pdf']);
+    // 조합 중 Enter 는 확정이 아니다
+    input = await app.startRenameTab('docB.pdf');
+    await input.fill('조합');
+    await input.evaluate((e) => e.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true, bubbles: true, cancelable: true })));
+    await expect(input).toBeVisible();
+    // 입력 밖으로 포커스가 나가면(blur) 확정
+    await input.evaluate((e) => (e as HTMLInputElement).blur());
+    await expect(page.getByTestId('rename-input')).toHaveCount(0);
+    expect(await app.tabNames()).toEqual(['docA.pdf', '조합.pdf']);
+  });
+
+  test('다른 열린 파일과 이름이 겹치면 (2) 로 구분한다. 방향키·공백은 입력으로만 간다', async ({ app }) => {
+    await app.goto();
+    await app.open([G.docA, G.docB]);
+    const input = await app.startRenameTab('docB.pdf');
+    await input.fill('docA');
+    await input.press('Home');
+    await input.press('ArrowRight');
+    await input.type(' ');
+    await expect(input).toBeFocused(); // 탭 이동(←/→/Home)으로 새지 않는다
+    await expect(input).toHaveValue('d ocA');
+    await input.fill('docA');
+    await input.press('Enter');
+    expect(await app.tabNames()).toEqual(['docA.pdf', 'docA (2).pdf']);
+    expect(await app.activeTabName()).toBe('docA (2).pdf');
+  });
+
+  test('탭 끌기·클릭은 그대로: 클릭은 활성화만, 문턱 넘게 끌면 순서가 바뀐다(이름 변경 없음)', async ({ app, page }) => {
+    await app.goto();
+    await app.open([G.docA, G.docB]);
+    await app.tab('docA.pdf').click();
+    expect(await app.activeTabName()).toBe('docA.pdf');
+    await expect(page.getByTestId('rename-input')).toHaveCount(0);
+    const a = (await app.tab('docA.pdf').boundingBox())!;
+    const b = (await app.tab('docB.pdf').boundingBox())!;
+    await page.mouse.move(a.x + 20, a.y + a.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(b.x + b.width - 10, b.y + b.height / 2, { steps: 12 });
+    await page.mouse.up();
+    await expect.poll(() => app.tabNames()).toEqual(['docB.pdf', 'docA.pdf']);
+    await expect(page.getByTestId('rename-input')).toHaveCount(0);
+  });
+
+  test('정리 모드 파일 목록에서도 더블클릭으로 이름을 바꾸고 저장 대화상자에 반영된다', async ({ app, page }) => {
+    await app.goto();
+    await app.open([G.docA, G.docB]);
+    await app.setMode('organize');
+    await app.fileOption('docB.pdf').dblclick();
+    const input = page.getByTestId('rename-input');
+    await expect(input).toBeFocused();
+    await expect(input).toHaveValue('docB.pdf');
+    await input.fill('보고서');
+    await input.press('Enter');
+    await expect.poll(() => app.fileNames()).toEqual(['docA.pdf', '보고서.pdf']);
+    await expect(app.fileOption('보고서.pdf')).toBeFocused();
+    // 파일 메뉴의 저장도 새 이름을 기본값으로 이름 확인을 거친다
+    await app.openFileMenu('보고서.pdf');
+    await app.menuItem('저장').click();
+    await expect(app.saveDialog().getByRole('textbox')).toHaveValue('보고서.pdf');
+    await page.keyboard.press('Escape');
+    await expect(app.saveDialog()).toHaveCount(0);
   });
 });

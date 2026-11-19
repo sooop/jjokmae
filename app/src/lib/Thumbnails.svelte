@@ -1,10 +1,12 @@
 <script lang="ts">
   // 좌측 썸네일 패널. 보이는 썸네일(+앞뒤 3칸)만 낮은 배율로 렌더하고, 벗어나면 비트맵을 버린다.
   // 다중 선택 표시와 드래그 재정렬(포인터 이벤트: 마우스·터치 공통)도 여기서 맡는다.
-  import { onMount, untrack, type Snippet } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import type { PageSize } from '../engine/adapter';
   import { renderBucket } from './grid';
-  import { DragSession } from './drag-session';
+  import { DragSession, gestureActive } from './drag-session';
+  import type { CtxRequest } from './PageGrid.svelte';
+  import { TouchHold } from './touch-hold';
   import type { ScreenRect } from './motion/drag-ghost';
   import { notifyUpdated, registerHost, type PageHost } from './motion/page-flip';
   import { settled } from './settle.svelte';
@@ -22,7 +24,7 @@
     onreorder,
     ontabdrop,
     ondragtab,
-    actions,
+    oncontext,
     boxW = 120,
     gen = 0,
     stateId = 0,
@@ -40,15 +42,16 @@
     rev?: number[];
     /** 다중 선택된 쪽(0부터) */
     checked?: number[];
-    onselect: (index: number, e: MouseEvent) => void;
+    /** 쪽을 눌렀다. shift·ctrl 이 모두 꺼져 있으면 '그 쪽으로 이동'(선택 모드에서는 부르는 쪽에 ctrl 로 바뀌어 온다), 체크박스는 ctrl 로 온다 */
+    onselect: (index: number, mod: { shift: boolean; ctrl: boolean }) => void;
     /** 드래그로 놓았을 때: moving 쪽들을 before 번 쪽 앞(n 이면 맨 끝)으로 */
     onreorder?: (moving: number[], before: number, starts?: Map<number, ScreenRect>) => void;
     /** 위쪽 탭 위에 놓았을 때(마우스 전용): moving 쪽들을 그 탭의 문서로 복사한다(move 면 이동: Shift 를 누른 채 놓음). rects 는 놓은 순간 고스트의 카드 자리 */
     ontabdrop?: (moving: number[], tabKey: number, rects?: ScreenRect[], move?: boolean) => void;
     /** 드래그 상태 알림: 끌기 시작·이동 중에는 {over: 탭 key 또는 null}, 끝나면 null */
     ondragtab?: (state: { over: number | null } | null) => void;
-    /** 항목별 아이콘 버튼 슬롯(ThumbItem 으로 전달) */
-    actions?: Snippet<[number]>;
+    /** 우클릭·길게 누르기·메뉴 키: 쪽 메뉴를 열어 달라는 요청(pages 는 누른 칸이 선택에 있으면 선택 전체, 없으면 그 칸만) */
+    oncontext?: (req: CtxRequest) => void;
   } = $props();
 
   const BOX_H = $derived(Math.round((boxW * 170) / 120));
@@ -93,6 +96,8 @@
   const itemH = $derived(sizes.map((s, i) => s.height * fit[i] + LABEL));
   const layout = $derived(computeLayout(itemH, GAP, PAD));
   const checkedSet = $derived(new Set(checked));
+  /** 선택이 하나라도 있다: 모든 칸에 체크박스를 보이고 본체 클릭이 선택을 토글한다 */
+  const selectMode = $derived(checked.length > 0);
 
   function update() {
     if (!scroller || !sizes.length) return;
@@ -189,8 +194,19 @@
     clear: () => (drag = null),
     returning: (m) => (returning = m),
   });
-  const onPress = (e: PointerEvent, index: number, handle: boolean) => {
-    if (onreorder) session.start(e, index, handle);
+  // 터치·펜: 길게 누르면 칸이 떠오르고(준비), 움직이면 끌기, 가만히 떼면 메뉴(touch-hold.ts)
+  let armedIdx = $state(-1);
+  const hold = new TouchHold({
+    arm: (i) => (armedIdx = i),
+    menu: (i, x, y) => openMenuAt(i, x, y, 'touch'),
+    drag: (e, i) => {
+      if (onreorder) session.start(e, i, true);
+    },
+    suppressClick: () => session.suppressClick(),
+  });
+  const onPress = (e: PointerEvent, index: number) => {
+    if (e.pointerType !== 'mouse') hold.press(e, index);
+    else if (onreorder) session.start(e, index, false);
   };
   // 끄는 사이 문서 화면이 바뀌면(되돌리기·다시하기 등) 집었던 번호가 낡았으므로 끌기를 버린다
   $effect(() => {
@@ -226,7 +242,33 @@
   const canvasOf = (i: number) => scroller.querySelector<HTMLCanvasElement>(`[data-thumb="${i}"] canvas`);
   function pick(i: number, e: MouseEvent) {
     if (session.justDragged) return;
-    onselect(i, e);
+    const mod = { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey };
+    // 선택 모드에서는 일반 클릭도 선택 토글(이동은 선택 모드가 아닐 때만)
+    if (selectMode && !mod.shift && !mod.ctrl) mod.ctrl = true;
+    onselect(i, mod);
+  }
+  const check = (i: number, shift: boolean) => onselect(i, { shift, ctrl: true });
+
+  // ---------- 쪽 메뉴: 우클릭·길게 누르기·메뉴 키 ----------
+  function openMenuAt(i: number, x: number, y: number, via: CtxRequest['via']) {
+    const pages = checkedSet.has(i) ? [...checked].sort((a, b) => a - b) : [i];
+    oncontext?.({ x, y, index: i, pages, via });
+  }
+  const thumbOf = (t: EventTarget | null) => (t as Element | null)?.closest?.('[data-thumb]') as HTMLElement | null;
+  function onCtx(e: MouseEvent) {
+    const el = thumbOf(e.target);
+    if (!el) return;
+    e.preventDefault();
+    if (hold.recent()) return; // 길게 누르기로 이미 연 메뉴
+    openMenuAt(Number(el.dataset.thumb), e.clientX, e.clientY, 'mouse');
+  }
+  function onKeyDown(e: KeyboardEvent) {
+    if (!(e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) || gestureActive()) return;
+    const el = thumbOf(e.target);
+    if (!el) return;
+    e.preventDefault();
+    const r = el.querySelector('.frame')?.getBoundingClientRect() ?? el.getBoundingClientRect();
+    openMenuAt(Number(el.dataset.thumb), r.left + r.width / 2, r.top + r.height / 2, 'key');
   }
   const dropTop = $derived.by(() => {
     if (!drag || !sizes.length) return 0;
@@ -281,11 +323,13 @@
       ro.disconnect();
       if (raf) cancelAnimationFrame(raf);
       session.dispose();
+      hold.cancel();
     };
   });
 </script>
 
-<div class="thumbs" class:holding class:dragging={!!drag} bind:this={scroller} onscroll={onScroll} onfocusin={onFocusIn} onfocusout={onFocusOut} role="list" aria-label="페이지 썸네일" data-testid="thumbs" data-pages={sizes.length}>
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+<div class="thumbs" class:holding class:dragging={!!drag} bind:this={scroller} onscroll={onScroll} onfocusin={onFocusIn} onfocusout={onFocusOut} oncontextmenu={onCtx} onkeydown={onKeyDown} role="list" aria-label="페이지 썸네일" data-testid="thumbs" data-pages={sizes.length}>
   <div class="content" style:height="{layout.total}px">
     {#key gen}
     {#each rows as i (i)}
@@ -304,9 +348,10 @@
           rev={rev[i] ?? 0}
           priority={() => 100 + Math.abs(i - current)}
           onselect={pick}
-          onpress={onreorder ? onPress : undefined}
-          showActions={boxW >= 112}
-          {actions}
+          onpress={onPress}
+          oncheck={check}
+          {selectMode}
+          armed={armedIdx === i}
         />
       </div>
     {/each}
@@ -347,6 +392,5 @@
   }
   .row.shifting { transition: transform var(--spring-glide-dur) var(--spring-glide); }
   .holding .row { visibility: hidden; }
-  .thumbs.dragging :global(.actions), .thumbs.dragging :global(.grip) { opacity: 0 !important; visibility: hidden !important; }
   .fly { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
 </style>

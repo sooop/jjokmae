@@ -8,7 +8,7 @@
 import type { DocId, PageSize, Rotation } from '../engine/adapter';
 import type { EngineKind } from '../engine/protocol';
 import type { EngineClient } from '../engine/worker-client';
-import { baseName, downloadBytes, editedName } from './download';
+import { baseName, cleanName, downloadBytes, editedName } from './download';
 import { freshCids, newCid } from './bitmap-cache';
 import { bootEngine, bootErrorMessage, ENGINE_LABEL } from './engine-boot';
 import { EnginePool } from './engine-pool';
@@ -18,7 +18,7 @@ import { splitNames } from './ranges';
 import { RenderScheduler } from './render-queue';
 import type { Settings } from './settings';
 import type { NoticeData, TabNotice, ViewerStatus } from './status';
-import { findBundlePartners, insertIndex, MAX_DOCS, newDocName, posLabel, quoteNames, range, uniqueName, type SendPos } from './transfer';
+import { findBundlePartners, insertIndex, MAX_DOCS, moveItem, newDocName, posLabel, quoteNames, range, uniqueName, type SendPos } from './transfer';
 import { makeZip } from './zip';
 
 /** 쪽마다 알고 있는 /Rotate 값. null 은 아직 모름(처음 회전할 때 알아낸다) */
@@ -88,6 +88,8 @@ export class DocState {
   /** 엔진 문서 ID. rebase 할 때마다 바뀐다 */
   id: DocId = '';
   name = $state('');
+  /** 사용자가 정한 저장 파일 이름(.pdf 포함). 빈 값이면 기본값(editedName) */
+  saveName = $state('');
   sizes = $state.raw<PageSize[]>([]);
   /** 쪽별 무효화 키. 주석·양식을 고치면 그 쪽만 올려 그 쪽 비트맵만 다시 그린다 */
   rev = $state<number[]>([]);
@@ -312,6 +314,36 @@ export class Workspace {
     this.clearNotices();
     if (this.tabNotice?.key === key) this.tabNotice = null;
     this.hooks.afterInstall?.(next);
+  }
+
+  /**
+   * 문서(탭)를 toIndex 자리로 옮긴다(범위 밖은 보정). 활성 문서·키·내용은 그대로이고 순서만 바뀐다.
+   * 실제로 순서가 바뀌었으면 true.
+   */
+  moveDoc(key: number, toIndex: number): boolean {
+    const from = this.docs.findIndex((d) => d.key === key);
+    if (from < 0) return false;
+    const next = moveItem(this.docs, from, toIndex);
+    if (next.every((d, i) => d === this.docs[i])) return false;
+    this.docs = next;
+    return true;
+  }
+
+  /**
+   * 파일 이름을 바꾼다(탭·파일 목록의 그 자리 이름 변경). 입력은 저장 이름과 같은 규칙으로 정리하고(금지 문자 제거·.pdf 보정),
+   * 다른 열린 파일과 겹치면 ‘이름 (2).pdf’ 로 구분한다. 저장 이름(saveName)도 같은 이름이 되어 저장할 때 ‘-편집’을 붙이지 않는다.
+   * 비었거나 이름이 그대로면 아무것도 하지 않고 false.
+   */
+  renameDoc(key: number, input: string): boolean {
+    const d = this.docOf(key);
+    if (!d) return false;
+    const clean = cleanName(input);
+    if (!clean) return false;
+    const name = uniqueName(this.docs.filter((x) => x !== d).map((x) => x.name), clean);
+    if (name === d.name) return false;
+    d.name = name;
+    d.saveName = name;
+    return true;
   }
 
   /** 탭 순서대로 한 칸 이동(방향 ±1, 처음과 끝은 이어진다) */
@@ -930,7 +962,8 @@ export class Workspace {
     });
   }
 
-  rotate(pages: number[]) {
+  /** delta: 시계 방향 90(기본)·반시계 방향 270 */
+  rotate(pages: number[], delta: 90 | 270 = 90) {
     const d = this.active;
     const list = sorted(pages);
     if (!d || !list.length) return;
@@ -942,7 +975,7 @@ export class Workspace {
       for (const i of list) cids[i] = newCid();
       for (const i of list) {
         const base = rot[i] ?? (await detectRotation(c, dd.id, i));
-        const next = addRotation(base);
+        const next = addRotation(base, delta);
         await c.rotatePage(dd.id, i, next);
         rot[i] = next;
       }
@@ -1521,7 +1554,7 @@ export class Workspace {
         }
         if (o.incremental && base.fullFallback) r = { ...r, fullFallback: true };
       }
-      downloadBytes(r.bytes, editedName(d.name));
+      downloadBytes(r.bytes, d.saveName || editedName(d.name));
       d.savedStateId = d.stateId;
       const notes: string[] = [];
       if (r.fullFallback) {

@@ -24,11 +24,11 @@ export function reorder(ws: Workspace, moving: number[], before: number, starts?
   ws.reorder(moving, before);
 }
 
-export function rotate(ws: Workspace, pages: number[]) {
+export function rotate(ws: Workspace, pages: number[], dir: 'cw' | 'ccw' = 'cw') {
   const d = ws.active;
   const list = uniq(pages).filter((i) => d && i >= 0 && i < d.total);
-  if (d && !ws.opBusy && list.length) play(ws, rotatePlan(d.sizes, list));
-  ws.rotate(pages);
+  if (d && !ws.opBusy && list.length) play(ws, rotatePlan(d.sizes, list, dir === 'cw' ? 90 : -90));
+  ws.rotate(pages, dir === 'cw' ? 90 : 270);
 }
 
 export function remove(ws: Workspace, pages: number[]) {

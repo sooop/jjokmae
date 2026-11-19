@@ -2,7 +2,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { HistoryPool, UndoHistory } from '../src/lib/history.ts';
-import { findBundlePartners, insertIndex, newDocName, posLabel, quoteNames, range, uniqueName } from '../src/lib/transfer.ts';
+import { cleanName } from '../src/lib/download.ts';
+import { findBundlePartners, insertIndex, moveItem, newDocName, posLabel, quoteNames, range, uniqueName } from '../src/lib/transfer.ts';
 
 test('uniqueName: 겹치면 (2), (3) … 으로 구분한다', () => {
   assert.equal(uniqueName([], 'a.pdf'), 'a.pdf');
@@ -10,6 +11,24 @@ test('uniqueName: 겹치면 (2), (3) … 으로 구분한다', () => {
   assert.equal(uniqueName(['a.pdf', 'a (2).pdf'], 'a.pdf'), 'a (3).pdf');
   assert.equal(uniqueName(['A.PDF'], 'a.pdf'), 'a (2).pdf'); // 대소문자 무시
   assert.equal(uniqueName(['x'], 'x'), 'x (2)'); // 확장자 없는 이름(MIME 으로만 PDF 판정)
+});
+
+// 이름 변경(ws.renameDoc)이 쓰는 규칙: 입력 정리(cleanName) 뒤 다른 열린 파일과 겹치면 uniqueName 으로 구분한다
+const renameTo = (others, input) => {
+  const c = cleanName(input);
+  return c ? uniqueName(others, c) : null;
+};
+test('이름 변경: 금지 문자 제거·.pdf 보정, 빈 값은 취소(null), 겹치면 (2) 로 구분', () => {
+  assert.equal(renameTo([], '계약서'), '계약서.pdf');
+  assert.equal(renameTo([], ' 계약서:최종?.PDF '), '계약서최종.pdf');
+  assert.equal(renameTo([], ''), null);
+  assert.equal(renameTo([], '  '), null);
+  assert.equal(renameTo([], '/:*?'), null);
+  assert.equal(renameTo([], '.pdf'), null);
+  assert.equal(renameTo(['a.pdf'], 'a'), 'a (2).pdf');
+  assert.equal(renameTo(['A.pdf', 'a (2).pdf'], 'a.pdf'), 'a (3).pdf'); // 대소문자 무시
+  assert.equal(renameTo(['b.pdf'], 'a'), 'a.pdf');
+  assert.equal(renameTo([], 'CON'), '_CON.pdf');
 });
 
 test('newDocName: 새 문서 N.pdf', () => {
@@ -127,3 +146,22 @@ test('pushRedo/pushUndo 도 문서 상한(단계 수·바이트)을 다시 검�
   for (let i = 0; i < 4; i++) c.pushRedo(snap(1));
   assert.equal(dropped.length, 2); // 버려진 단계는 ondrop 으로 알린다
 });
+
+test('moveItem: 문서 순서 변경은 항목(키)을 그대로 두고 범위를 보정한다', () => {
+  const docs = [{ key: 1 }, { key: 2 }, { key: 3 }, { key: 4 }];
+  const keys = (l) => l.map((d) => d.key);
+  assert.deepEqual(keys(moveItem(docs, 0, 2)), [2, 3, 1, 4]);
+  assert.deepEqual(keys(moveItem(docs, 3, 0)), [4, 1, 2, 3]);
+  assert.deepEqual(keys(moveItem(docs, 1, 99)), [1, 3, 4, 2]); // 큰 값은 끝으로
+  assert.deepEqual(keys(moveItem(docs, 2, -5)), [3, 1, 2, 4]); // 음수는 맨 앞으로
+  assert.deepEqual(keys(moveItem(docs, 1, 1)), [1, 2, 3, 4]); // 제자리
+  assert.deepEqual(keys(moveItem(docs, 9, 0)), [1, 2, 3, 4]); // 없는 항목은 그대로
+  assert.deepEqual(keys(moveItem(docs, 1, NaN)), [1, 2, 3, 4]);
+  const out = moveItem(docs, 0, 3);
+  assert.notEqual(out, docs); // 원본은 바뀌지 않는다
+  assert.deepEqual(keys(docs), [1, 2, 3, 4]);
+  assert.ok(out.every((d) => docs.includes(d))); // 같은 객체(활성 문서·키 유지)
+  assert.deepEqual(moveItem([], 0, 0), []);
+  assert.deepEqual(moveItem([7], 0, 5), [7]);
+});
+

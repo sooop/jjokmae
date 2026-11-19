@@ -13,12 +13,13 @@
   // 정리 모드의 쪽 썸네일 격자. 보이는 줄(+앞뒤 한 줄)만 렌더하고, 선택(클릭·Ctrl·Shift·영역 끌기·키보드)과
   // 드래그(격자 안 재정렬 / 왼쪽 파일 목록으로 보내기), 우클릭·길게 누르기 메뉴 요청을 맡는다.
   // 선택은 부모(DocState.selected)와 공유한다. 이 컴포넌트는 선택을 직접 들고 있지 않는다.
-  import { onMount, untrack, type Snippet } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import type { PageSize } from '../engine/adapter';
   import { bandHits, boxHeight, cellRect, dropAt, GRID_LABEL, gridAspect, gridGeom, moveFocus, renderBucket, visibleRows, type DropSpot, type GridGeom, type Rect } from './grid';
   import { DragSession, buttonsLost, gestureActive, holdGesture, releaseGesture, watchPointerLoss } from './drag-session';
   import type { ScreenRect } from './motion/drag-ghost';
   import { notifyUpdated, registerHost, type PageHost } from './motion/page-flip';
+  import { TouchHold } from './touch-hold';
   import type { RenderScheduler } from './render-queue';
   import { clickSelect, span } from './selection';
   import { GRID_MAX, GRID_MIN } from './settings';
@@ -35,7 +36,6 @@
     anchor,
     thumb,
     initialScroll = 0,
-    actions,
     onthumb,
     onscrollpos,
     onchange,
@@ -58,7 +58,6 @@
     /** 썸네일 칸 폭(px). 연속으로 바뀌는 동안은 CSS 로만 보이고, 멈춘 뒤 해상도를 다시 그린다 */
     thumb: number;
     initialScroll?: number;
-    actions?: Snippet<[number]>;
     onthumb: (v: number) => void;
     onscrollpos?: (top: number) => void;
     onchange: (selected: number[], anchor: number | null) => void;
@@ -128,7 +127,8 @@
     return { x: r.x + (r.w - fw) / 2, y: r.y + r.h - (fh + GRID_LABEL - 2) - liftFor(g, s), w: fw, h: fh };
   }
   const renderScale = (s: PageSize) => Math.min(renderT / s.width, (renderT * geom.aspect) / s.height) * dpr;
-  const showActions = $derived(geom.cellW >= 112);
+  /** 선택이 하나라도 있다: 모든 칸에 체크박스를 보이고 본체 클릭이 선택을 토글한다 */
+  const selectMode = $derived(selected.length > 0);
 
   let centerIdx = 0;
   let lastTopIdx = 0;
@@ -191,13 +191,21 @@
   const suppressClick = () => session.suppressClick();
   const sameList = (a: number[], b: number[]) => a.length === b.length && a.every((v, k) => v === b[k]);
 
-  function pick(i: number, e: MouseEvent) {
-    if (session.justDragged) return;
-    const r = clickSelect(selected, anchor, i, { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey });
+  function apply(i: number, mod: { shift: boolean; ctrl: boolean }) {
+    const r = clickSelect(selected, anchor, i, mod);
     onchange(r.selected, r.anchor);
     focusIdx = i;
     scroller.focus({ preventScroll: true });
   }
+  function pick(i: number, e: MouseEvent) {
+    if (session.justDragged) return;
+    const mod = { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey };
+    // 선택 모드에서는 일반 클릭도 선택 토글(선택이 없을 때의 일반 클릭은 그 칸만 고른다 = 선택 모드 시작)
+    if (selectMode && !mod.shift && !mod.ctrl) mod.ctrl = true;
+    apply(i, mod);
+  }
+  /** 체크박스: 그 칸만 더하거나 뺀다(Shift 면 기준 칸부터 범위를 더한다) */
+  const check = (i: number, shift: boolean) => apply(i, { shift, ctrl: true });
 
   // ---------- 영역(러버밴드) 선택 ----------
   let band = $state<{ x: number; y: number; w: number; h: number } | null>(null);
@@ -331,7 +339,7 @@
     scroller: () => scroller,
     token: () => `${gen}:${stateId}`,
     edgeStep: 14,
-    onDragStart: () => cancelLong(),
+    onDragStart: () => hold.cancel(),
     begin: (press, pt) => {
       const idx = press.index;
       const moving = selSet.has(idx) && selected.length > 1 ? [...selected].sort((a, b) => a - b) : [idx];
@@ -360,7 +368,18 @@
     clear: () => (drag = null),
     returning: (m) => (returning = m),
   });
-  const onPress = (e: PointerEvent, index: number, handle: boolean) => session.start(e, index, handle);
+  // 터치·펜: 길게 누르면 칸이 떠오르고(준비), 움직이면 끌기, 가만히 떼면 메뉴(touch-hold.ts)
+  let armedIdx = $state(-1);
+  const hold = new TouchHold({
+    arm: (i) => (armedIdx = i),
+    menu: (i, x, y) => openMenuAt(i, x, y, 'touch'),
+    drag: (e, i) => session.start(e, i, true),
+    suppressClick: () => session.suppressClick(),
+  });
+  const onPress = (e: PointerEvent, index: number) => {
+    if (e.pointerType !== 'mouse') hold.press(e, index);
+    else session.start(e, index, false);
+  };
   // 끄는 사이 문서 화면이 바뀌면(되돌리기·다시하기 등) 집었던 번호가 낡았으므로 끌기를 버린다
   $effect(() => {
     void `${gen}:${stateId}`;
@@ -405,41 +424,9 @@
 
   const canvasOf = (i: number) => scroller.querySelector<HTMLCanvasElement>(`[data-thumb="${i}"] canvas`);
 
-  // ---------- 길게 누르기(터치) = 우클릭 메뉴 ----------
-  let longTimer = 0;
-  let longStart: { x: number; y: number; id: number } | null = null;
-  let longAt = 0;
-
-  function cancelLong() {
-    if (longTimer) clearTimeout(longTimer);
-    longTimer = 0;
-    longStart = null;
-    window.removeEventListener('pointermove', onLongMove);
-    window.removeEventListener('pointerup', cancelLong);
-    window.removeEventListener('pointercancel', cancelLong);
-  }
-  function onLongMove(e: PointerEvent) {
-    if (longStart && e.pointerId === longStart.id && Math.hypot(e.clientX - longStart.x, e.clientY - longStart.y) > 8) cancelLong();
-  }
+  // ---------- 쪽 메뉴: 우클릭·길게 누르기(터치, hold)·메뉴 키 ----------
   function onScrollerDown(e: PointerEvent) {
     onBgDown(e);
-    if (e.pointerType === 'mouse') return;
-    const el = (e.target as Element).closest('[data-thumb]') as HTMLElement | null;
-    if (!el || (e.target as Element).closest('.grip, .actions')) return;
-    const i = Number(el.dataset.thumb);
-    cancelLong();
-    longStart = { x: e.clientX, y: e.clientY, id: e.pointerId };
-    window.addEventListener('pointermove', onLongMove);
-    window.addEventListener('pointerup', cancelLong);
-    window.addEventListener('pointercancel', cancelLong);
-    longTimer = window.setTimeout(() => {
-      const s = longStart;
-      cancelLong();
-      if (!s) return;
-      longAt = Date.now();
-      suppressClick();
-      openMenuAt(i, s.x, s.y, 'touch');
-    }, 500);
   }
 
   function openMenuAt(i: number, x: number, y: number, via: CtxRequest['via']) {
@@ -456,7 +443,7 @@
     const el = (e.target as Element).closest('[data-thumb]') as HTMLElement | null;
     if (!el) return;
     e.preventDefault();
-    if (Date.now() - longAt < 800) return; // 길게 누르기로 이미 연 메뉴
+    if (hold.recent()) return; // 길게 누르기로 이미 연 메뉴
     openMenuAt(Number(el.dataset.thumb), e.clientX, e.clientY, 'mouse');
   }
 
@@ -601,7 +588,7 @@
       if (raf) cancelAnimationFrame(raf);
       session.dispose();
       endBand();
-      cancelLong();
+      hold.cancel();
     };
   });
 </script>
@@ -663,9 +650,10 @@
               priority={() => Math.abs(i - centerIdx)}
               onselect={pick}
               onpress={onPress}
+              oncheck={check}
+              {selectMode}
+              armed={armedIdx === i}
               ondblopen={onopen}
-              {showActions}
-              {actions}
             />
           </div>
         {/if}
@@ -704,8 +692,6 @@
   .cell.shifting { transition: transform var(--spring-glide-dur) var(--spring-glide); }
   /* 쪽 이동 연출 중: 새 칸은 비행체가 내려앉을 때까지 가려 둔다 */
   .holding .cell { visibility: hidden; }
-  /* 끌고 있는 동안은 칸 위에 뜨는 버튼 줄·손잡이를 숨긴다 */
-  .dragging :global(.actions), .dragging :global(.grip) { opacity: 0 !important; visibility: hidden !important; }
   .fly { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
   .drop {
     position: absolute;

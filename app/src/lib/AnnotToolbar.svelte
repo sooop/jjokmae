@@ -3,6 +3,7 @@
   import type { Annotation } from '../engine/adapter';
   import { FONT_SIZES, hasColor, hasContents, PALETTE, TYPE_LABEL, type Tool } from './annot-geom';
   import type { AnnotUi } from './annot-ui.svelte';
+  import { collapseIn, collapseOut } from './motion';
   import type { NoticeData } from './status';
   import Icon from './ui/Icon.svelte';
   import IconButton from './ui/IconButton.svelte';
@@ -87,10 +88,14 @@
   const showFont = $derived(fontTool || (sel?.type === 'freetext' && ui.tool === 'select'));
   const fontValue = $derived(sel?.type === 'freetext' && ui.tool === 'select' ? Number(sel.extra?.fontSize ?? ui.fontSize) : ui.fontSize);
   const sameHex = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+  /** 접혀 있어도 양식 칸 수·안내는 보여야 한다: 그 둘이 없으면 막대 전체를 접는다 */
+  const shown = $derived(ui.open || formCount > 0 || !!notice);
 </script>
 
-<div class="bar" aria-label="주석">
+{#if shown}
+<div class="bar" aria-label="주석" in:collapseIn out:collapseOut>
   <div class="row">
+    {#if ui.open}
     <div class="tools" role="toolbar" aria-label="주석 도구">
       {#each tools as t (t.tool)}
         <IconButton icon={t.icon} label={t.label} pressed={ui.tool === t.tool} onclick={() => ui.setTool(t.tool)} />
@@ -103,12 +108,14 @@
         onclick={onrequestimage}
       />
     </div>
+    {/if}
     <div class="anchor">
       {#if notice}
         <Notice floating align="left" kind={notice.kind} text={notice.text} reassure={notice.reassure} detail={notice.detail} onclose={onclosenotice} />
       {/if}
     </div>
 
+    {#if ui.open}
     {#if showPalette}
       <div class="swatches" role="group" aria-label="색">
         {#each PALETTE as c (c.hex)}
@@ -171,6 +178,7 @@
         <IconButton icon="trash" label="주석 삭제 (Delete)" onclick={ondelete} disabled={busy} />
       </div>
     {/if}
+    {/if}
 
     <span class="spacer"></span>
 
@@ -185,6 +193,7 @@
   </div>
 
 </div>
+{/if}
 
 <style>
   .bar {

@@ -116,8 +116,8 @@ test.describe('쪽 조작', () => {
     expect(await app.total()).toBe(2);
     await app.change(() => app.thumbAction(0, 'delete'));
     expect(await app.total()).toBe(1);
-    await app.thumb(0).hover();
-    await expect(app.thumbActionButton(0, 'delete')).toBeDisabled();
+    await expect(await app.thumbActionItem(0, 'delete')).toBeDisabled(); // 한 쪽만 남으면 메뉴의 삭제는 꺼진다
+    await page.keyboard.press('Escape');
     // Delete 키로 모든 쪽을 지우려 하면 안내하고 막는다
     await app.clickThumb(0);
     await page.keyboard.press('Delete');
@@ -141,25 +141,40 @@ test.describe('쪽 조작', () => {
 
 test.describe('쪽 조작: 터치', () => {
   test.use({ hasTouch: true });
-  test('터치 기기에서는 손잡이를 끌어 순서를 바꾼다', async ({ app, page }) => {
+  test('터치 기기에서는 쪽을 길게 눌렀다가 끌어 순서를 바꾼다(체크박스는 항상 보인다)', async ({ app, page }) => {
     await app.goto();
     await app.open(G.five);
     const cdp = await page.context().newCDPSession(page);
     await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
-    const grip = page.getByRole('button', { name: '1쪽을 끌어서 옮기기' });
-    await expect(grip).toBeVisible();
-    const a = (await grip.boundingBox())!;
+    await expect(app.pageCheckbox(0)).toBeVisible();
+    expect(await app.pageCheckbox(0).evaluate((e) => getComputedStyle(e).opacity)).toBe('1');
+    const a = (await app.thumbFace(0).boundingBox())!;
     const t = (await app.thumbFace(3).boundingBox())!;
     const sx = a.x + a.width / 2, sy = a.y + a.height / 2;
     const ex = t.x + t.width / 2, ey = t.y + 4;
     await app.change(async () => {
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: sx, y: sy }] });
+      await page.waitForTimeout(700); // 길게 누르기(준비)
       for (let k = 1; k <= 10; k++) await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: sx + ((ex - sx) * k) / 10, y: sy + ((ey - sy) * k) / 10 }] });
       await expect(page.getByTestId('drop-line')).toHaveAttribute('data-before', '3');
       await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
     });
     const { info } = await app.saveAndInspect();
     expect(texts(info)).toEqual(['PAGE-2', 'PAGE-3', 'PAGE-1', 'PAGE-4', 'PAGE-5']);
+  });
+
+  test('터치: 길게 누르고 움직이지 않고 떼면 쪽 메뉴가 열린다(끌기와 충돌하지 않는다)', async ({ app, page }) => {
+    await app.goto();
+    await app.open(G.five);
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+    const a = (await app.thumbFace(1).boundingBox())!;
+    const sx = a.x + a.width / 2, sy = a.y + a.height / 2;
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: sx, y: sy }] });
+    await page.waitForTimeout(700);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await expect(app.contextMenu()).toBeVisible();
+    await expect(app.thumbMenuItem('delete')).toBeVisible();
   });
 });
 

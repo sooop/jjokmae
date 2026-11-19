@@ -4,10 +4,12 @@
   import { onMount, tick } from 'svelte';
   import { flip } from 'svelte/animate';
   import { growIn, reduced, shrinkOut, solveSpring, SPRING } from './motion';
+  import { keyShift, posMsg, SortDrag } from './motion/sort-drag';
   import type { TabNotice } from './status';
   import CloseConfirm from './CloseConfirm.svelte';
   import Icon from './ui/Icon.svelte';
   import Notice from './ui/Notice.svelte';
+  import RenameInput from './ui/RenameInput.svelte';
 
   let {
     tabs,
@@ -18,6 +20,8 @@
     confirm,
     onactivate,
     onclose,
+    onmove,
+    onrename,
     onclosenotice,
     onconfirm,
   }: {
@@ -32,6 +36,10 @@
     confirm: { key: number; busy: boolean } | null;
     onactivate: (key: number) => void;
     onclose: (key: number) => void;
+    /** 탭을 끌거나 Alt+←/→ 로 toIndex 자리로 옮긴다 */
+    onmove: (key: number, toIndex: number) => void;
+    /** 이름 변경을 확정했다(입력은 아직 정리 전) */
+    onrename: (key: number, name: string) => void;
     onclosenotice: () => void;
     onconfirm: (choice: 'save' | 'discard' | 'cancel') => void;
   } = $props();
@@ -63,6 +71,50 @@
     trackRaf = requestAnimationFrame(loop);
   }
   const flipSpring = solveSpring(SPRING.glide);
+
+  // 탭 순서 바꾸기: 끄는 동안 미리보기 순서로 그리고(나머지 탭은 FLIP 으로 비킨다), 끄는 탭은 빈 슬롯으로 둔다
+  let preview = $state<number[] | null>(null);
+  let slotKey = $state<number | null>(null);
+  let live = $state('');
+  const shown = $derived(preview ? preview.map((k) => tabs.find((t) => t.key === k)).filter((t): t is (typeof tabs)[number] => !!t) : tabs);
+  const sort = new SortDrag({
+    axis: 'x',
+    scroller: () => strip,
+    itemEl: (k) => tabEl(k),
+    keys: () => tabs.map((t) => t.key),
+    preview: (o) => (preview = o),
+    slot: (k) => (slotKey = k),
+    commit: (k, i) => onmove(k, i),
+    announce: (m) => (live = m),
+    nameOf: (k) => tabs.find((t) => t.key === k)?.name ?? '',
+  });
+  // 이름 변경: 이름을 더블클릭하거나 F2. 입력칸이 탭의 이름 단추 자리를 대신한다
+  let editing = $state<number | null>(null);
+  function startRename(key: number) {
+    if (sort.busy || confirm) return;
+    editing = key;
+  }
+  async function endRename(byKey: boolean) {
+    const k = editing;
+    editing = null;
+    if (!byKey || k == null) return;
+    await tick();
+    document.getElementById(`tab-${k}`)?.focus();
+  }
+  function onTabDown(e: PointerEvent, key: number) {
+    if ((e.target as Element).closest('.x')) return;
+    sort.start(e, key);
+  }
+  async function moveBy(key: number, d: -1 | 1) {
+    const i = tabs.findIndex((t) => t.key === key);
+    const j = i + d;
+    if (i < 0 || j < 0 || j >= tabs.length) return;
+    onmove(key, j);
+    live = posMsg(tabs[i].name, j, tabs.length);
+    await tick();
+    document.getElementById(`tab-${key}`)?.focus();
+    tabEl(key)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
 
   const confirmTab = $derived(confirm ? tabs.find((t) => t.key === confirm.key) : undefined);
   const anchorKey = $derived(confirm?.key ?? notice?.key ?? null);
@@ -96,6 +148,7 @@
   $effect(() => {
     void activeKey;
     void tabs.length;
+    void shown;
     void tick().then(() => {
       measureInk();
       track();
@@ -114,10 +167,26 @@
       ro.disconnect();
       clearTimeout(t);
       cancelAnimationFrame(trackRaf);
+      sort.dispose();
     };
   });
 
   async function onKey(e: KeyboardEvent) {
+    if (e.key === 'F2' && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
+      const key = Number((e.target as HTMLElement).closest<HTMLElement>('[data-tab-key]')?.dataset.tabKey);
+      if (Number.isNaN(key)) return;
+      e.preventDefault();
+      startRename(key);
+      return;
+    }
+    const sh = keyShift(e, 'x');
+    if (sh) {
+      const key = Number((e.target as HTMLElement).closest<HTMLElement>('[data-tab-key]')?.dataset.tabKey);
+      if (Number.isNaN(key)) return;
+      e.preventDefault();
+      await moveBy(key, sh);
+      return;
+    }
     const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End'];
     if (!keys.includes(e.key) || e.ctrlKey || e.altKey || e.metaKey) return;
     e.preventDefault();
@@ -135,7 +204,7 @@
 <div class="tabbar" bind:this={bar}>
   <div class="strip" bind:this={strip} role="tablist" tabindex="-1" aria-label="열린 파일" onkeydown={onKey} data-testid="tabs">
     {#if ink}<span class="ink" class:ready={inkReady} style:transform="translateX({ink.x}px)" style:width="{ink.w}px" aria-hidden="true"></span>{/if}
-    {#each tabs as t (t.key)}
+    {#each shown as t (t.key)}
       <div
         animate:flip={{ duration: reduced() ? 0 : flipSpring.duration, easing: flipSpring.fn }}
         in:growIn={{ w: 240, minW: 120 }}
@@ -144,11 +213,23 @@
         class:active={t.key === activeKey}
         class:droppable={dragging && t.key !== activeKey}
         class:over={dragOver === t.key}
+        class:slot={slotKey === t.key}
         role="presentation"
         data-tab-key={t.key}
         data-tab-name={t.name}
+        onpointerdown={(e) => onTabDown(e, t.key)}
         data-droppable={dragging && t.key !== activeKey ? '' : undefined}
       >
+        {#if editing === t.key}
+          <div class="name editing">
+            <RenameInput
+              value={t.name}
+              label="{t.name} 이름 변경"
+              oncommit={(n, byKey) => { onrename(t.key, n); void endRename(byKey); }}
+              oncancel={(byKey) => void endRename(byKey)}
+            />
+          </div>
+        {:else}
         <button
           type="button"
           class="name"
@@ -157,18 +238,22 @@
           aria-selected={t.key === activeKey}
           tabindex={t.key === activeKey ? 0 : -1}
           title={t.dirty ? `${t.name} (변경됨)` : t.name}
+          aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight F2"
           onclick={() => onactivate(t.key)}
+          ondblclick={() => startRename(t.key)}
           data-testid="tab"
         >
           <span class="nm">{t.name}</span>
           {#if t.dirty}<span class="dot" role="img" aria-label="변경됨" data-testid="tab-dirty"></span>{/if}
         </button>
+        {/if}
         <button type="button" class="x" aria-label="{t.name} 닫기" title="닫기 (Ctrl+W)" onclick={() => onclose(t.key)} data-testid="tab-close">
           <Icon name="close" size={14} />
         </button>
       </div>
     {/each}
   </div>
+  <span class="live" aria-live="polite" role="status">{live}</span>
 
   {#if confirm && confirmTab}
     <div class="anchor" style:left="{anchorLeft}px">
@@ -225,6 +310,9 @@
     transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
   }
   .tab:hover:not(.active):not(.over) { background: var(--hover); }
+  .tab.slot { background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px dashed var(--fg-muted); }
+  .tab.slot > * { opacity: 0; }
+  .live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .tab.droppable { border: 1px dashed var(--fg-muted); }
   .tab.over { background: var(--accent); color: var(--accent-fg); border: 1px solid var(--accent); }
   .name {
@@ -241,6 +329,7 @@
     color: inherit;
     text-align: left;
   }
+  .name.editing { padding: 0 4px 0 4px; }
   .name:hover:not(:disabled), .name:active:not(:disabled) { background: transparent; border-color: transparent; transform: none; }
   .tab.active .name { font-weight: 600; }
   .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

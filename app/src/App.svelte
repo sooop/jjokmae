@@ -1,9 +1,8 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
-  import { popIn, popOut, rangeFill, reduced, scrimFade } from './lib/motion';
+  import { panelIn, panelOut, popIn, popOut, rangeFill, reduced, scrimFade, softOut } from './lib/motion';
   import { noteState } from './lib/motion/page-flip';
   import { gestureActive } from './lib/drag-session';
-  import { captureThumbs, landThumbs } from './lib/motion/mode-flip';
   import type { Annotation, FormField, NewAnnotation, PagePoint, Rect } from './engine/adapter';
   import AnnotToolbar from './lib/AnnotToolbar.svelte';
   import { hasHangul, type Tool } from './lib/annot-geom';
@@ -24,21 +23,24 @@
   import { detectRotation } from './lib/page-ops';
   import { stats } from './lib/render-queue';
   import SaveControl from './lib/SaveControl.svelte';
+  import SaveNameDialog from './lib/SaveNameDialog.svelte';
   import { clickSelect } from './lib/selection';
   import SendPopover from './lib/SendPopover.svelte';
+  import { editedName } from './lib/download';
   import { clampGrid, clampSide, clampZoom, loadSettings, saveSettings, SIDE_MAX, SIDE_MIN, defaultSettings, type Settings } from './lib/settings';
   import SettingsDrawer from './lib/SettingsDrawer.svelte';
   import SplitPopover from './lib/SplitPopover.svelte';
   import { prepareImage, releaseImage, StampFileError, stampFor, type PreparedImage } from './lib/stamp-image';
   import { applyTheme } from './lib/theme';
   import TabBar from './lib/TabBar.svelte';
+  import PageMenu, { type PageMenuReq } from './lib/PageMenu.svelte';
   import Thumbnails from './lib/Thumbnails.svelte';
   import type { SendPos } from './lib/transfer';
   import Icon from './lib/ui/Icon.svelte';
   import IconButton from './lib/ui/IconButton.svelte';
   import Notice from './lib/ui/Notice.svelte';
   import Viewer from './lib/Viewer.svelte';
-  import { Workspace } from './lib/workspace.svelte';
+  import { Workspace, type DocState } from './lib/workspace.svelte';
   import { stepZoom, ZOOM_PRESETS } from './lib/zoom';
   import { sliderToZoom, ZOOM_SLIDER_MAX, zoomToSlider } from './lib/zoom-scale';
 
@@ -50,6 +52,8 @@
 
   // 팝오버
   let splitOpen = $state(false);
+  /** 썸네일 패널의 쪽 메뉴(우클릭·길게 누르기·메뉴 키) */
+  let pageMenu = $state<PageMenuReq | null>(null);
   let sendOpen = $state(false);
   let mergeOpen = $state(false);
   let printOpen = $state(false);
@@ -72,6 +76,10 @@
 
   // 주석·양식 편집 상태(활성 문서 하나에 대한 것. 문서를 바꾸면 초기화한다)
   const ui = new AnnotUi();
+  // 주석을 고르거나 선택 외의 도구가 되면(도구 단축키·이미지 넣기) 도구 모음을 펼친다
+  $effect(() => {
+    if (ui.sel || ui.tool !== 'select') ui.open = true;
+  });
   let forms = $state<FormField[]>([]);
   let stampInput: HTMLInputElement;
   let koWarned = false;
@@ -149,14 +157,9 @@
     if (d) noteState(d.key, d.stateId);
   });
 
-  /** 보기 ↔ 정리 전환: 옛 썸네일이 새 화면의 같은 쪽 자리로 날아가 앉는다(실제 화면은 바로 조작할 수 있다) */
+  /** 보기 ↔ 정리 전환: 왼쪽 패널이 미끄러져 나가거나 들어오고, 본체는 흐려졌다 나타난다 */
   async function switchMode() {
-    const snaps = captureThumbs();
     ws.toggleMode();
-    if (!snaps.length) return;
-    await tick();
-    await new Promise((r) => requestAnimationFrame(r));
-    landThumbs(snaps);
   }
   const tabs = $derived(ws.docs.map((d) => ({ key: d.key, name: d.name, dirty: d.dirty })));
 
@@ -241,17 +244,21 @@
   }
 
   // ---------- 쪽 선택 ----------
-  function onPick2(i: number, e: MouseEvent) {
+  // 쪽 얼굴을 눌렀다. Shift·Ctrl(체크박스는 Ctrl)은 선택만 바꾸고, 수정자 없는 일반 클릭은 선택을 풀고 그 쪽으로 간다
+  // (선택이 있는 선택 모드에서는 썸네일 패널이 일반 클릭을 Ctrl 로 바꿔 보내므로 이동하지 않는다).
+  function onPick2(i: number, mod: { shift: boolean; ctrl: boolean }) {
     const d = doc;
     if (!d) return;
-    const mod = { shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey };
-    const hadAnchor = d.anchor != null;
-    const r = clickSelect(d.selected, d.anchor, i, mod);
+    if (!mod.shift && !mod.ctrl) {
+      d.selected = [];
+      d.anchor = i;
+      ui.clearSelection();
+      goto(i);
+      return;
+    }
+    const r = clickSelect(d.selected, d.anchor ?? d.current, i, mod);
     d.selected = r.selected;
     d.anchor = r.anchor;
-    if ((mod.shift && hadAnchor) || mod.ctrl) return;
-    ui.clearSelection();
-    goto(i);
   }
 
   // ---------- 주석·양식 편집 ----------
@@ -294,6 +301,28 @@
     if (!d) return;
     await flushEdits();
     await ws.save(d);
+  }
+
+  // 저장 파일 이름 확인: 저장 버튼·Ctrl+S·정리 모드의 파일 저장은 모두 이 대화상자를 먼저 거친다
+  let saveAsk = $state<{ key: number } | null>(null);
+  /** 대화상자 입력칸의 처음 값. 닫히는 동안에도 내용이 바뀌지 않게 열 때 한 번만 정한다 */
+  let saveAskName = $state('');
+  async function askSave(target?: DocState) {
+    const d = target ?? doc;
+    if (!d || saveAsk || ws.saving) return;
+    if (d === doc) await flushEdits(); // 입력 중인 칸을 확정하고 줄 서 있는 편집을 기다린다
+    if (saveAsk || !ws.docs.includes(d) || ws.saving || ws.opBusy) return;
+    saveAskName = d.saveName || editedName(d.name);
+    saveAsk = { key: d.key };
+  }
+  async function confirmSaveName(name: string) {
+    const a = saveAsk;
+    saveAsk = null;
+    const d = a ? ws.docOf(a.key) : undefined;
+    if (!d) return;
+    d.saveName = name === editedName(d.name) ? '' : name;
+    if (d === doc) await requestSave();
+    else await ws.save(d);
   }
 
   // ---------- 인쇄 ----------
@@ -592,6 +621,11 @@
   const TOOL_KEYS: Record<string, Tool> = { v: 'select', h: 'highlight', r: 'square', o: 'circle', n: 'memo', t: 'freetext' };
   function onKey(e: KeyboardEvent) {
     const t = e.target as HTMLElement | null;
+    // 저장 이름 대화상자가 떠 있는 동안 뒤 화면의 단축키는 받지 않는다(Esc·Enter 는 대화상자가 처리한다)
+    if (saveAsk) {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 's') e.preventDefault();
+      return;
+    }
     const typing = !!t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
     // 쪽을 누르거나 끄는 중에는 구조를 바꾸는 단축키(되돌리기·탭 닫기·모드 전환·삭제 등)를 받지 않는다. Esc 는 끌기 쪽이 먼저 받아 취소한다
     if (gestureActive() && e.key !== 'Escape') {
@@ -602,7 +636,7 @@
       const k = e.key.toLowerCase();
       if (k === 's') {
         e.preventDefault();
-        void requestSave();
+        void askSave();
       } else if (k === 'p') {
         // 브라우저 기본 인쇄(화면 그대로 찍힘)를 막고 인쇄 대화상자를 연다
         e.preventDefault();
@@ -635,8 +669,8 @@
     if (!e.shiftKey && e.key.toLowerCase() === 'g') { e.preventDefault(); void switchMode(); return; }
     if (ws.mode === 'organize') return; // 아래는 보기 모드 전용(도구·쪽 이동·확대). 정리 모드의 쪽 키는 격자가 맡는다
     const tool = e.shiftKey ? undefined : TOOL_KEYS[e.key.toLowerCase()];
-    if (tool) { e.preventDefault(); ui.setTool(tool); return; }
-    if (!e.shiftKey && e.key.toLowerCase() === 's') { e.preventDefault(); if (!ws.opBusy) stampInput.click(); return; }
+    if (tool) { e.preventDefault(); ui.open = true; ui.setTool(tool); return; }
+    if (!e.shiftKey && e.key.toLowerCase() === 's') { e.preventDefault(); ui.open = true; if (!ws.opBusy) stampInput.click(); return; }
     if (e.key === 'Delete' && ui.sel) { e.preventDefault(); deleteSelectedAnnot(); return; }
     if (e.key === 'Escape' && (ui.sel || ui.tool !== 'select')) { ui.clearSelection(); ui.tool = 'select'; return; }
     if (e.key === 'PageDown') { e.preventDefault(); goto(current + 1); }
@@ -667,11 +701,15 @@
   ondrop={(e) => e.preventDefault()}
 />
 
-{#snippet actions(i: number)}
-  <IconButton icon="rotate-cw" label="{i + 1}쪽 시계 방향 90° 회전" onclick={() => pa.rotate(ws, [i])} disabled={ws.opBusy} />
-  <IconButton icon="copy" label="{i + 1}쪽 뒤에 복제" onclick={() => pa.duplicate(ws, [i])} disabled={ws.opBusy} />
-  <IconButton icon="trash" label="{i + 1}쪽 삭제" onclick={() => pa.remove(ws, [i])} disabled={ws.opBusy || total <= 1} />
-{/snippet}
+{#if pageMenu && doc && ws.mode !== 'organize'}
+  <PageMenu
+    {ws}
+    req={pageMenu}
+    onsplit={() => setTimeout(() => { splitOpen = true; ws.splitNotice = null; ws.splitError = null; }, 0)}
+    onprint={() => openPrint('selected')}
+    onclose={() => (pageMenu = null)}
+  />
+{/if}
 
 {#snippet pageOverlay(i: number, visible: boolean)}
   {#if doc && doc.sizes[i]}
@@ -715,9 +753,7 @@
 <div class="app" data-busy={ws.opBusy || ws.editPending > 0}>
   <header class="toolbar">
     {#if doc}
-      {#if ws.mode === 'view'}
-        <IconButton icon="folder" label="파일 열기 (Ctrl+O)" onclick={() => input.click()} />
-      {/if}
+      <IconButton icon="folder" label="파일 열기 (Ctrl+O)" onclick={() => input.click()} />
       <IconButton icon="grid" label="정리 모드 (G)" pressed={ws.mode === 'organize'} onclick={() => void switchMode()} />
       <div class="anchor" bind:this={mergeRoot}>
         <IconButton
@@ -758,33 +794,36 @@
         <span class="total">/ {total}</span>
         <IconButton icon="chevron-right" label="다음 쪽" onclick={() => goto(current + 1)} disabled={current >= total - 1} />
       </div>
-      <div class="zoom">
-        <input
-          class="zoom-slider"
-          type="range"
-          min="0"
-          max={ZOOM_SLIDER_MAX}
-          step="1"
-          value={zoomToSlider(shownZoom)}
-          use:rangeFill={zoomToSlider(shownZoom)}
-          aria-label="확대 배율 슬라이더"
-          aria-valuetext="{Math.round(shownZoom * 100)}%"
-          title="확대 배율 (25–400%)"
-          oninput={onZoomSlide}
-          onchange={commitZoom}
-          onpointerdown={() => (sliding = true)}
-          onpointerup={() => (sliding = false)}
-          onpointercancel={() => (sliding = false)}
-          data-testid="zoom-slider"
-        />
-        <select aria-label="확대 배율" title="확대 배율" value={shownZoom} onchange={(e) => { dragZoom = null; setZoom(Number(e.currentTarget.value)); }}>
-          {#each zoomOptions as z (z)}<option value={z}>{Math.round(z * 100)}%</option>{/each}
-        </select>
-      </div>
       {/if}
     {/if}
     <span class="spacer"></span>
     {#if doc}
+      {#if ws.mode === 'view'}
+        <div class="zoom">
+          <input
+            class="zoom-slider"
+            type="range"
+            min="0"
+            max={ZOOM_SLIDER_MAX}
+            step="1"
+            value={zoomToSlider(shownZoom)}
+            use:rangeFill={zoomToSlider(shownZoom)}
+            aria-label="확대 배율 슬라이더"
+            aria-valuetext="{Math.round(shownZoom * 100)}%"
+            title="확대 배율 (25–400%)"
+            oninput={onZoomSlide}
+            onchange={commitZoom}
+            onpointerdown={() => (sliding = true)}
+            onpointerup={() => (sliding = false)}
+            onpointercancel={() => (sliding = false)}
+            data-testid="zoom-slider"
+          />
+          <select aria-label="확대 배율" title="확대 배율" value={shownZoom} onchange={(e) => { dragZoom = null; setZoom(Number(e.currentTarget.value)); }}>
+            {#each zoomOptions as z (z)}<option value={z}>{Math.round(z * 100)}%</option>{/each}
+          </select>
+        </div>
+        <IconButton icon="highlighter" label="주석 도구 모음" pressed={ui.open} onclick={() => ui.toggleOpen()} />
+      {/if}
       <div class="hist">
         <IconButton icon="undo" label="되돌리기 (Ctrl+Z)" onclick={() => void pa.step(ws, 'undo')} disabled={ws.opBusy || doc.undoCount === 0} />
         <IconButton icon="redo" label="다시하기 (Ctrl+Shift+Z)" onclick={() => void pa.step(ws, 'redo')} disabled={ws.opBusy || doc.redoCount === 0} />
@@ -833,7 +872,7 @@
         busy={ws.saving || (ws.opBusy && ws.editPending === 0)}
         saving={ws.saving}
         notice={ws.saveNotice}
-        onsave={() => void requestSave()}
+        onsave={() => void askSave()}
         onchange={patchSettings}
         onclosenotice={() => (ws.saveNotice = null)}
       />
@@ -851,6 +890,8 @@
       confirm={ws.confirmClose}
       onactivate={(k) => ws.activate(k)}
       onclose={(k) => void ws.close(k)}
+      onmove={(k, i) => ws.moveDoc(k, i)}
+      onrename={(k, n) => ws.renameDoc(k, n)}
       onclosenotice={() => (ws.tabNotice = null)}
       onconfirm={(c) => void onConfirmClose(c)}
     />
@@ -872,24 +913,25 @@
       </div>
     {/if}
     {#if doc && ws.mode === 'organize'}
+      <div class="mode-wrap" out:softOut|global>
       <Organize
         {ws}
         thumb={settings.gridThumb}
-        {actions}
         {sendButton}
         onthumb={(v) => patchSettings({ gridThumb: v })}
         onopenfile={() => input.click()}
         onconfirm={(c) => void onConfirmClose(c)}
-        onsave={(d) => void (d.key === ws.activeKey ? requestSave() : ws.save(d))}
+        onsave={(d) => void askSave(d)}
         onsplit={() => setTimeout(() => { splitOpen = true; ws.splitNotice = null; ws.splitError = null; }, 0)}
         onprint={openPrint}
       />
+      </div>
       {#if ws.status}
         <EngineStatus status={ws.status} ondismiss={() => (ws.status = null)} />
       {/if}
     {:else}
     {#if doc}
-      <aside class="side" aria-label="페이지 목록" style:width="{settings.sideWidth}px" bind:this={sideEl}>
+      <aside class="side" aria-label="페이지 목록" in:panelIn|global out:panelOut|global style:width="{settings.sideWidth}px" bind:this={sideEl}>
         <PageTools
           count={selected.length}
           busy={ws.opBusy}
@@ -917,8 +959,8 @@
               onreorder={(m, b, s) => pa.reorder(ws, m, b, s)}
               ontabdrop={onTabDrop}
               ondragtab={(s) => (dragTab = s)}
+              oncontext={(r) => (pageMenu = { x: r.x, y: r.y, fromKey: d.key, pages: r.pages })}
               boxW={settings.sideWidth - 56}
-              {actions}
             />
           {/each}
         </div>
@@ -944,7 +986,7 @@
       </aside>
     {/if}
 
-    <main class="viewer-area" aria-label="뷰어">
+    <main class="viewer-area" aria-label="뷰어" out:softOut|global>
       {#if doc}
         <AnnotToolbar
           {ui}
@@ -1004,6 +1046,8 @@
     {/if}
   </div>
 
+  <SaveNameDialog open={saveAsk != null} defaultName={saveAskName} onconfirm={(n) => void confirmSaveName(n)} oncancel={() => (saveAsk = null)} />
+
   <input bind:this={input} type="file" accept=".pdf,application/pdf" multiple hidden onchange={onPick} data-testid="file-input" />
   <input bind:this={stampInput} type="file" accept="image/png,image/jpeg" hidden onchange={() => void onStampFile()} data-testid="stamp-input" />
 </div>
@@ -1026,8 +1070,10 @@
   .page-input { width: 4.5ch; min-width: 40px; text-align: center; padding: 4px 2px; }
   .total { color: var(--fg-muted); font-variant-numeric: tabular-nums; margin: 0 4px 0 2px; }
   .zoom { gap: 8px; padding-left: 4px; }
-  .zoom-slider { width: 132px; }
+  .zoom-slider { width: 132px; min-width: 0; flex: 0 1 132px; }
   .zoom select { width: 88px; }
+  @media (max-width: 860px) { .zoom-slider { flex-basis: 84px; width: 84px; } }
+  @media (max-width: 680px) { .zoom-slider { display: none; } .zoom select { width: 76px; } }
   .toolbar > .anchor + .nav, .nav, .zoom, .hist { position: relative; }
   .nav::before, .zoom::before, .hist::before { content: ''; position: absolute; left: -5px; top: 8px; bottom: 8px; width: 1px; background: var(--border-soft); }
 
@@ -1086,7 +1132,8 @@
   @media (pointer: coarse) {
     .split { right: -14px; width: 28px; }
   }
-  .side, .viewer-area { animation: kf-fade var(--dur-base) var(--ease-out); }
+  .viewer-area { animation: kf-fade var(--dur-base) var(--ease-out); }
+  .mode-wrap { flex: 1; min-width: 0; min-height: 0; display: flex; }
   .viewer-area { position: relative; flex: 1; min-width: 0; overflow: hidden; display: flex; flex-direction: column; }
   .viewer-host { position: relative; flex: 1; min-height: 0; overflow: hidden; }
   /* 첫 화면: 종이 석 장이 부채꼴로 펼쳐지고 버튼이 뒤따라 떠오른다. 파일을 끌어 오면 종이가 들썩인다 */

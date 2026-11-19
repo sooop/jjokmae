@@ -180,7 +180,7 @@ test.describe('쪽 그림 재사용', () => {
     expect(await app.renderQuiet()).toBe(c0);
     // 회전은 그 쪽만
     await app.openCellMenu(0);
-    await app.change(() => app.menuItem('회전').click());
+    await app.change(() => app.menuItem(/오른쪽으로 회전/).click());
     for (let i = 0; i < 6; i++) await app.cellDrawn(i);
     expect(await app.renderQuiet()).toBe(c0 + 1);
     expect(page.url()).toBeTruthy();

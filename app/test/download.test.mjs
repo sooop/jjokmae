@@ -1,7 +1,7 @@
 // 다운로드 파일 이름 정리 시험. 실행: cd app && node --test test/download.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { baseName, editedName, MAX_NAME_BYTES, safeName } from '../src/lib/download.ts';
+import { baseName, cleanName, editedName, MAX_NAME_BYTES, normalizeSaveName, safeName } from '../src/lib/download.ts';
 
 test('금지 문자는 _ 로 바뀐다(역슬래시 포함)', () => {
   const bs = String.fromCharCode(92);
@@ -35,4 +35,28 @@ test('길이는 UTF-8 200바이트로 제한하고 코드 포인트를 쪼개지
 test('보통 이름은 그대로', () => {
   assert.equal(safeName('계약서 (2)'), '계약서 (2)');
   assert.equal(editedName('내 문서.PDF'), '내 문서-편집.pdf');
+});
+
+test('저장 파일 이름: 금지 문자 제거, .pdf 보정, 빈 값은 기본값', () => {
+  const bs = String.fromCharCode(92);
+  const fb = '기본-편집.pdf';
+  assert.equal(normalizeSaveName('계약서', fb), '계약서.pdf');
+  assert.equal(normalizeSaveName('계약서.PDF', fb), '계약서.pdf');
+  assert.equal(normalizeSaveName('  a' + bs + 'b/c:d*e?f"g<h>i|j  ', fb), 'abcdefghij.pdf');
+  assert.equal(normalizeSaveName('', fb), fb);
+  assert.equal(normalizeSaveName('  ', fb), fb);
+  assert.equal(normalizeSaveName('/:*?', fb), fb);
+  assert.equal(normalizeSaveName('.pdf', fb), fb);
+  assert.equal(normalizeSaveName('...', fb), fb);
+  assert.equal(normalizeSaveName('CON', fb), '_CON.pdf');
+  assert.equal(normalizeSaveName('a.pdf.pdf', fb), 'a.pdf.pdf');
+  assert.ok(new TextEncoder().encode(normalizeSaveName('가'.repeat(300), fb)).length <= 204);
+});
+
+test('cleanName: normalizeSaveName 과 같은 규칙, 이름이 될 수 없으면 null', () => {
+  assert.equal(cleanName('계약서'), '계약서.pdf');
+  assert.equal(cleanName('a:b'), 'ab.pdf');
+  assert.equal(cleanName(''), null);
+  assert.equal(cleanName('...'), null);
+  assert.equal(cleanName('.pdf'), null);
 });

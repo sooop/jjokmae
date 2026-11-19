@@ -95,7 +95,10 @@ test.describe('양식: 체크·라디오·콤보·목록·읽기 전용', () => 
     await field(app, 'name').focus();
     await field(app, 'name').selectText();
     await page.keyboard.insertText('Yan');
-    const b = await app.download(() => page.getByTestId('save').click()); // 실제 마우스로 저장 단추
+    const b = await app.download(async () => {
+      await page.getByTestId('save').click(); // 실제 마우스로 저장 단추
+      await app.confirmSaveDialog();
+    });
     expect((await fieldValues(b.bytes)).find((x) => x.name === 'name')?.value).toBe('Yan');
   });
 

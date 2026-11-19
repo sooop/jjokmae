@@ -38,9 +38,23 @@ export class AnnotUi {
     }
   }
 
+  /** 주석 도구 모음을 펼쳤는가. 도구 단축키·주석 선택은 펼치고, 토글로 닫으면 선택 도구로 돌아간다 */
+  open = $state(false);
+
   setTool(t: Tool) {
     this.tool = t;
     if (t !== 'select') this.sel = null;
+  }
+
+  /** 도구 모음 접기·펼치기 */
+  toggleOpen() {
+    if (this.open) {
+      this.open = false;
+      this.tool = 'select';
+      this.sel = null;
+    } else {
+      this.open = true;
+    }
   }
 
   select(page: number, annot: Annotation) {

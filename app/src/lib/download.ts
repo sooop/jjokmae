@@ -37,6 +37,21 @@ export const baseName = (name: string) => safeName(name.replace(/\.pdf$/i, ''));
 /** 저장 파일 이름: '<원본>-편집.pdf' */
 export const editedName = (name: string) => `${baseName(name)}-편집.pdf`;
 
+/**
+ * 사용자가 입력한 저장 파일 이름을 정리한다: 금지 문자(\ / : * ? " < > | 와 제어 문자)는 제거, 확장자 .pdf 를 보정한다.
+ * 비어 있거나(정리 뒤에도) 이름이 될 수 없으면 fallback 으로 돌아간다.
+ */
+export function normalizeSaveName(input: string, fallback: string): string {
+  const stripped = input.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '').trim().replace(/\.pdf$/i, '').trim();
+  if (!stripped || /^[. ]+$/.test(stripped)) return fallback;
+  return `${safeName(stripped)}.pdf`;
+}
+
+/** 이름 변경 입력을 정리한다(normalizeSaveName 과 같은 규칙). 비었거나 이름이 될 수 없으면 null */
+export function cleanName(input: string): string | null {
+  return normalizeSaveName(input, '') || null;
+}
+
 export function downloadBytes(bytes: Uint8Array, filename: string, type = 'application/pdf'): void {
   const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type }));
   const a = document.createElement('a');

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { popIn, popOut } from './motion';
   // 저장 버튼(항상 새 파일로 내려받기) + 저장 옵션 팝오버. 저장 직후의 안내는 이 버튼 아래에 붙는다.
+  // 저장 파일 이름은 저장을 누를 때 뜨는 대화상자(SaveNameDialog)에서 정한다.
   import type { Settings } from './settings';
   import type { NoticeData } from './status';
   import IconButton from './ui/IconButton.svelte';

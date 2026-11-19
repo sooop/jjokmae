@@ -12,14 +12,16 @@
 <script lang="ts">
   // 정리 모드 왼쪽 파일 목록. 파일마다 이름·쪽 수·변경됨 점·파일별 선택 쪽 수·닫기 버튼.
   // 쪽을 끌어 오면(dragging) 활성이 아닌 파일 항목과 맨 아래 '새 파일' 칸이 놓을 수 있는 대상으로 강조된다.
-  import { onMount, tick } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { flip } from 'svelte/animate';
   import { popIn, popOut, reduced, slideDownIn, slideUpOut, solveSpring, SPRING } from './motion';
   import CloseConfirm from './CloseConfirm.svelte';
   import type { TabNotice } from './status';
+  import { keyShift, posMsg, SortDrag } from './motion/sort-drag';
   import Icon from './ui/Icon.svelte';
   import IconButton from './ui/IconButton.svelte';
   import Notice from './ui/Notice.svelte';
+  import RenameInput from './ui/RenameInput.svelte';
   import { restoreFocus } from './ui/restore-focus';
 
   let {
@@ -33,6 +35,8 @@
     confirm,
     onactivate,
     onclose,
+    onmove,
+    onrename,
     onopenfile,
     onsendall,
     oncontext,
@@ -51,6 +55,10 @@
     confirm: { key: number; busy: boolean } | null;
     onactivate: (key: number) => void;
     onclose: (key: number) => void;
+    /** 파일을 끌거나 Alt+↑/↓ 로 toIndex 자리로 옮긴다 */
+    onmove: (key: number, toIndex: number) => void;
+    /** 이름 변경을 확정했다(입력은 아직 정리 전) */
+    onrename: (key: number, name: string) => void;
     onopenfile: () => void;
     onsendall: (mode: 'copy' | 'move') => void;
     oncontext: (req: { key: number; x: number; y: number }) => void;
@@ -129,6 +137,7 @@
   $effect(() => {
     void activeKey;
     void files.length;
+    void shown;
     void confirm;
     void notice;
     void tick().then(() => {
@@ -143,17 +152,72 @@
       cancelAnimationFrame(trackRaf);
     };
   });
+  // 파일 순서 바꾸기: 끄는 동안 미리보기 순서로 그리고(나머지는 FLIP 으로 비킨다), 끄는 항목은 빈 슬롯으로 둔다
+  let preview = $state<number[] | null>(null);
+  let slotKey = $state<number | null>(null);
+  let live = $state('');
+  const shown = $derived(preview ? preview.map((k) => files.find((f) => f.key === k)).filter((f): f is FileRow => !!f) : files);
+  const entryEl = (k: number) => listEl?.querySelector<HTMLElement>(`[data-file-key="${k}"]`)?.closest<HTMLElement>('.entry') ?? null;
+  const sort = new SortDrag({
+    axis: 'y',
+    scroller: () => listEl,
+    itemEl: entryEl,
+    keys: () => files.map((f) => f.key),
+    preview: (o) => (preview = o),
+    slot: (k) => (slotKey = k),
+    commit: (k, i) => onmove(k, i),
+    announce: (m) => (live = m),
+    nameOf: (k) => files.find((f) => f.key === k)?.name ?? '',
+  });
+  onDestroy(() => sort.dispose());
+  // 이름 변경: 이름을 더블클릭하거나 F2. 입력칸이 행의 이름 자리를 대신한다
+  let editing = $state<number | null>(null);
+  function startRename(key: number) {
+    if (sort.busy || confirm || dragging) return;
+    editing = key;
+  }
+  async function endRename(byKey: boolean) {
+    const k = editing;
+    editing = null;
+    if (!byKey || k == null) return;
+    await tick();
+    document.getElementById(`file-${k}`)?.focus();
+  }
+  async function moveBy(key: number, d: -1 | 1) {
+    const i = files.findIndex((f) => f.key === key);
+    const j = i + d;
+    if (i < 0 || j < 0 || j >= files.length) return;
+    onmove(key, j);
+    live = posMsg(files[i].name, j, files.length);
+    await tick();
+    document.getElementById(`file-${key}`)?.focus();
+  }
   const confirmFile = $derived(confirm ? files.find((f) => f.key === confirm.key) : undefined);
 
   async function onKey(e: KeyboardEvent) {
     const t = e.target as HTMLElement;
     const i = files.findIndex((f) => f.key === activeKey);
+    if (e.key === 'F2' && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey) {
+      const k = Number(t.closest<HTMLElement>('[data-file-key]')?.dataset.fileKey);
+      if (Number.isNaN(k)) return;
+      e.preventDefault();
+      startRename(k);
+      return;
+    }
     if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
       const el = t.closest<HTMLElement>('[data-file-key]');
       if (!el) return;
       e.preventDefault();
       const r = el.getBoundingClientRect();
       oncontext({ key: Number(el.dataset.fileKey), x: r.left + r.width / 2, y: r.top + r.height / 2 });
+      return;
+    }
+    const sh = keyShift(e, 'y');
+    if (sh) {
+      const k = Number(t.closest<HTMLElement>('[data-file-key]')?.dataset.fileKey);
+      if (Number.isNaN(k)) return;
+      e.preventDefault();
+      await moveBy(k, sh);
       return;
     }
     const keys = ['ArrowUp', 'ArrowDown', 'Home', 'End'];
@@ -174,6 +238,10 @@
 
   // 터치: 길게 누르면 우클릭 메뉴
   let longTimer = 0;
+  function rowDown(e: PointerEvent, key: number) {
+    if (!(e.target as Element).closest('button.x')) sort.start(e, key);
+    longDown(e, key);
+  }
   function longDown(e: PointerEvent, key: number) {
     if (e.pointerType === 'mouse' || (e.target as Element).closest('button.x')) return;
     clearTimeout(longTimer);
@@ -207,7 +275,7 @@
 
   <div class="list" bind:this={listEl} role="listbox" tabindex="-1" aria-label="열린 파일" onkeydown={onKey} data-testid="file-list">
     {#if ink}<span class="ink" class:ready={inkReady} style:transform="translateY({ink.y}px)" style:height="{ink.h}px" aria-hidden="true"></span>{/if}
-    {#each files as f (f.key)}
+    {#each shown as f (f.key)}
       {@const isSelf = f.key === activeKey}
       <div class="entry" animate:flip={{ duration: reduced() ? 0 : flipSpring.duration, easing: flipSpring.fn }} in:slideDownIn={{ h: 64 }} out:slideUpOut={{ h: 64 }}>
       <div
@@ -216,17 +284,31 @@
         class:droppable={dragging && !isSelf}
         class:over={dragOver === f.key}
         class:disabled={dragging && isSelf}
+        class:slot={slotKey === f.key}
         role="presentation"
         data-file-key={f.key}
         data-tab-key={f.key}
         data-tab-name={f.name}
         data-droppable={dragging && !isSelf ? '' : undefined}
         oncontextmenu={(e) => onCtx(e, f.key)}
-        onpointerdown={(e) => longDown(e, f.key)}
+        onpointerdown={(e) => rowDown(e, f.key)}
         onpointerup={longCancel}
         onpointercancel={longCancel}
         onpointermove={longCancel}
       >
+        {#if editing === f.key}
+        <div class="opt editing">
+          <span class="l1">
+            <RenameInput
+              value={f.name}
+              label="{f.name} 이름 변경"
+              oncommit={(n, byKey) => { onrename(f.key, n); void endRename(byKey); }}
+              oncancel={(byKey) => void endRename(byKey)}
+            />
+          </span>
+          <span class="l2"><span class="pages">{f.total}쪽</span></span>
+        </div>
+        {:else}
         <div
           class="opt"
           role="option"
@@ -235,7 +317,9 @@
           aria-disabled={dragging && isSelf ? 'true' : undefined}
           tabindex={isSelf ? 0 : -1}
           title={f.dirty ? `${f.name} (변경됨)` : f.name}
+          aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown F2"
           onclick={() => onactivate(f.key)}
+          ondblclick={() => startRename(f.key)}
           onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), onactivate(f.key))}
           data-testid="file"
         >
@@ -248,6 +332,7 @@
             {#if f.sel > 0}<span class="badge" role="img" aria-label="선택한 쪽 {f.sel}개" title="이 파일에서 고른 쪽 {f.sel}개" data-testid="file-sel">{f.sel}</span>{/if}
           </span>
         </div>
+        {/if}
         <button type="button" class="x" aria-label="{f.name} 닫기" title="닫기 (Ctrl+W)" onclick={() => onclose(f.key)} data-testid="file-close">
           <Icon name="close" size={14} />
         </button>
@@ -262,6 +347,7 @@
       </div>
     {/each}
   </div>
+  <span class="live" aria-live="polite" role="status">{live}</span>
 
   <div
     class="newslot"
@@ -280,6 +366,7 @@
 
 <style>
   .files {
+    position: relative;
     flex: none;
     width: 248px;
     display: flex;
@@ -333,6 +420,9 @@
   .row:hover:not(.active):not(.over) { background: var(--hover); }
   .row.droppable { border: 1px dashed var(--fg-muted); }
   .row.over { background: var(--accent); color: var(--accent-fg); border: 1px solid var(--accent); }
+  .row.slot { background: color-mix(in srgb, var(--accent) 12%, transparent); border: 1px dashed var(--fg-muted); }
+  .row.slot > * { opacity: 0; }
+  .live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .row.disabled { opacity: 0.45; }
   .opt {
     flex: 1;
@@ -344,6 +434,7 @@
     cursor: pointer;
     outline: none;
   }
+  .opt.editing { cursor: default; }
   .opt:focus-visible { outline: 2px solid var(--fg); outline-offset: -2px; }
   .l1, .l2 { display: flex; align-items: center; gap: 6px; min-width: 0; }
   .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

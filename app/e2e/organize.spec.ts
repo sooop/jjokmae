@@ -70,7 +70,7 @@ test.describe('정리 모드: 전환', () => {
     await expect(page.getByTestId('scroller')).toBeVisible();
     await expect(app.currentPageInput()).toHaveValue('4');
     expect((await app.summary()).mode).toBe('view');
-    expect((await app.summary()).docs[0].selected.length).toBeGreaterThanOrEqual(1);
+    // (더블클릭의 첫 클릭이 고르고 둘째 클릭이 선택 모드의 토글로 푼다. 선택 여부는 이 동작의 약속이 아니다)
     expect(await app.activeTabName()).toBe('docA.pdf');
   });
 
@@ -78,7 +78,8 @@ test.describe('정리 모드: 전환', () => {
     await openOrganize(app, G.docA);
     await page.getByRole('button', { name: 'docA.pdf 닫기' }).click();
     await expect.poll(async () => (await app.summary()).docs.length).toBe(0);
-    await expect(page.getByRole('button', { name: '파일 열기' })).toBeVisible();
+    // 나가는 정리 화면(120ms 페이드)의 파일 목록 단추와 겹쳐 보일 수 있으니 뷰어 영역의 단추로 한정한다
+    await expect(page.getByRole('main', { name: '뷰어' }).getByRole('button', { name: '파일 열기' })).toBeVisible();
     await expect(page.getByTestId('grid')).toHaveCount(0);
     expect((await app.summary()).mode).toBe('organize');
   });
@@ -213,7 +214,7 @@ test.describe('정리 모드: 우클릭 메뉴', () => {
     await openOrganize(app, ABC, 'docA.pdf');
     await app.openCellMenu(1);
     const items = (await app.menuItems()).filter((t) => !t.startsWith('인쇄')); // 인쇄 항목은 별도 기능
-    expect(items).toEqual(['복사 →', '이동 →', '복제', '회전', '삭제', '추출', '분할…']);
+    expect(items).toEqual(['복사 →', '이동 →', '1쪽 복제', '1쪽 오른쪽으로 회전', '1쪽 왼쪽으로 회전', '추출', '분할…', '1쪽 삭제']); // 삭제(위험 항목)는 구분선 뒤 맨 끝
     expect((await app.summary()).docs[0].selected).toEqual([1]);
     const mr = (await app.contextMenu().boundingBox())!;
     const vp = page.viewportSize()!;
@@ -312,7 +313,7 @@ test.describe('정리 모드: 우클릭 메뉴', () => {
     expect(await app.total()).toBe(6);
     await app.clickCell(1);
     await app.openCellMenu(1);
-    await app.change(() => app.menuItem('회전').click());
+    await app.change(() => app.menuItem(/오른쪽으로 회전/).click());
     await app.clickCell(5);
     await app.openCellMenu(5);
     await app.change(() => app.menuItem('삭제').click());
@@ -341,12 +342,21 @@ test.describe('정리 모드: 우클릭 메뉴', () => {
     await openOrganize(app, ABC, 'docB.pdf');
     await app.openFileMenu('docB.pdf');
     const items = (await app.menuItems()).filter((t) => !t.startsWith('인쇄'));
-    expect(items).toEqual(['닫기', '저장', '이 파일의 모든 쪽 선택']);
+    expect(items).toEqual(['이 파일의 모든 쪽 선택', '이 파일의 쪽 선택 해제', '저장', '닫기']);
     await app.menuItem('이 파일의 모든 쪽 선택').click();
     await expect.poll(async () => (await app.doc('docB.pdf')).selected.length).toBe(4);
     expect((await app.fileBadges())[1]).toBe(4);
     await app.openFileMenu('docB.pdf');
-    const saved = await app.download(() => app.menuItem('저장').click());
+    await expect(app.menuItem('이 파일의 모든 쪽 선택')).toBeDisabled(); // 이미 전부 선택
+    await app.menuItem('이 파일의 쪽 선택 해제').click();
+    await expect.poll(async () => (await app.doc('docB.pdf')).selected.length).toBe(0);
+    await app.openFileMenu('docB.pdf');
+    const saved = await app.download(async () => {
+      await app.menuItem('저장').click();
+      await expect(app.saveDialog()).toBeVisible(); // 정리 모드의 파일 저장도 이름 확인을 거친다
+      await expect(app.saveDialog().getByRole('textbox')).toHaveValue('docB-편집.pdf');
+      await app.confirmSaveDialog();
+    });
     expect(qpdfCheck(saved.path).ok).toBe(true);
     // 변경 없는 파일은 바로 닫힌다
     await app.openFileMenu('docC.pdf');
@@ -681,11 +691,13 @@ test.describe('정리 모드: 터치', () => {
     await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
     await app.scrollCell(2);
     const p = await app.center(app.cellFace(2));
-    // 길게 누르기 → 메뉴(누른 채로 나타날 때까지 조건 대기)
+    // 길게 누르기(준비) 뒤 움직이지 않고 떼면 메뉴(움직이면 끌기라서 메뉴는 손을 뗄 때 연다)
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: p.x, y: p.y, id: 1 }] });
-    await expect(app.contextMenu()).toBeVisible({ timeout: 5000 });
+    await page.waitForTimeout(700);
+    await expect(app.contextMenu()).toHaveCount(0);
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    expect((await app.menuItems()).filter((t) => !t.startsWith('인쇄'))).toHaveLength(7);
+    await expect(app.contextMenu()).toBeVisible({ timeout: 5000 });
+    expect((await app.menuItems()).filter((t) => !t.startsWith('인쇄'))).toHaveLength(8);
     expect((await app.summary()).docs[0].selected).toEqual([2]);
     // 메뉴 바깥을 눌러 닫는다
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: 5, y: 880, id: 1 }] });

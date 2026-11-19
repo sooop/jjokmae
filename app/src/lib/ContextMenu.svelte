@@ -7,6 +7,10 @@
     title?: string;
     /** 하위 항목이 있으면 눌렀을 때 이 메뉴 안에서 하위 목록으로 들어간다 */
     sub?: MenuItem[];
+    /** 위험 항목(삭제 등): 위험색으로 칠한다. 맨 아래, divider 뒤에 둔다 */
+    danger?: boolean;
+    /** 이 항목 위에 구분선을 긋는다 */
+    divider?: boolean;
   }
 </script>
 
@@ -180,7 +184,7 @@
   onkeydown={onKey}
   oncontextmenu={(e) => e.preventDefault()}
   data-testid="context-menu"
-  use:restoreFocus={{ fallback: ['[data-testid=grid]', '[data-testid=file][aria-selected=true]'] }}
+  use:restoreFocus={{ fallback: ['[data-testid=grid]', '[data-testid=thumbs] button[aria-current=page]', '[data-testid=file][aria-selected=true]'] }}
   in:popIn|global={{ origin: 'top left', from: 0.88, y: -4 }}
   out:popOut|global={{ origin: 'top left' }}
 >
@@ -191,6 +195,8 @@
       role="menuitem"
       class="item"
       class:back={r.id === '__back'}
+      class:danger={r.danger}
+      class:divider={r.divider}
       disabled={r.disabled}
       aria-haspopup={r.sub ? 'menu' : undefined}
       tabindex={i === active ? 0 : -1}
@@ -257,5 +263,17 @@
   .item:focus-visible { outline: 2px solid var(--fg); outline-offset: -2px; }
   .item:hover:not(:disabled) { background: transparent; border-color: transparent; }
   .back { color: var(--fg-muted); font-weight: 600; }
+  .divider { margin-top: 7px; }
+  .divider::before {
+    content: '';
+    position: absolute;
+    left: 6px;
+    right: 6px;
+    top: -4px;
+    height: 1px;
+    background: var(--border-soft);
+    pointer-events: none;
+  }
+  .danger:not(:disabled) { color: var(--danger); }
   .lb { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>
